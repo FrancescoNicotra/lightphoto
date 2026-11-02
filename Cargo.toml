@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/xmp", "crates/lut", "tools/xmp-dump"]
+members = ["crates/xmp", "crates/lut", "crates/raw", "tools/xmp-dump", "tools/lumen-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,9 +10,20 @@ license = "MIT"
 [workspace.dependencies]
 xmp = { path = "crates/xmp" }
 lut = { path = "crates/lut" }
+raw = { path = "crates/raw" }
 roxmltree = "0.20"
 flate2 = "1"
+rawler = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+rayon = "1"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Decoding and demosaicing are unusable without optimisations.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.raw]
+opt-level = 3

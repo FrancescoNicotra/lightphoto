@@ -1,0 +1,10 @@
+[package]
+name = "lumen-cli"
+description = "Develop RAW files from the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+raw.workspace = true
+image.workspace = true
