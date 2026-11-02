@@ -47,3 +47,49 @@ fn as_shot_white_balance_matches_lightroom() {
         "ours {ours:?}, Lightroom {temperature} K / {tint:+}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Panasonic GX80 RW2 from raw.pixls.us (CC0), downloaded into samples/pixls/:
+// https://raw.pixls.us/data/Panasonic/DMC-GX80/P1010041.RW2
+
+const RW2: &str = "pixls/P1010041.RW2";
+
+/// Mean linear sRGB colour, normalised to G = 1.
+fn chroma(pixels: impl Iterator<Item = [f32; 3]>) -> [f64; 3] {
+    let mut sum = [0.0f64; 3];
+    for p in pixels {
+        (0..3).for_each(|c| sum[c] += p[c].clamp(0.0, 1.0) as f64);
+    }
+    sum.map(|s| s / sum[1])
+}
+
+#[test]
+fn decodes_the_gx80_rw2() {
+    let Some(path) = sample(RW2) else { return };
+    let photo = Photo::load(&path, &DecodeOptions::default()).unwrap();
+    assert_eq!((photo.info.make.as_str(), photo.info.model.as_str()), ("Panasonic", "DMC-GX80"));
+    assert_eq!((photo.data.width, photo.data.height), (4592, 3448));
+    let raw = photo.info.raw.as_ref().unwrap();
+    assert!(!raw.is_dng);
+    assert_eq!(raw.cfa, "BGGR");
+    let tt = TempTint::from_xy(photo.as_shot_white().unwrap());
+    assert!((4000.0..6000.0).contains(&tt.temperature), "{tt:?}"); // sunny day
+
+    // Full and half size agree.
+    let half = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    assert_eq!((half.data.width, half.data.height), (2296, 1724));
+    let to_srgb = raw::color::to_f32(&raw::color::prophoto_to_srgb());
+    let srgb = |p: &Photo| {
+        let img = p.to_working(None).downscale(400);
+        chroma(img.pixels.into_iter().map(|px| raw::color::apply(&to_srgb, px)))
+    };
+    let (full_c, half_c) = (srgb(&photo), srgb(&half));
+    assert!(full_c.iter().zip(half_c).all(|(a, b)| (a - b).abs() < 0.01), "{full_c:?} vs {half_c:?}");
+
+    // Same overall colour cast as the camera's own JPEG. Only roughly: the
+    // camera adds its tone curve and a more saturated look.
+    let preview = raw::embedded_preview(&path).unwrap().unwrap().into_rgb32f();
+    let camera = chroma(preview.pixels().map(|p| p.0.map(raw::color::srgb_eotf)));
+    eprintln!("mean colour, G = 1: ours {full_c:.3?}, camera {camera:.3?}");
+    assert!(full_c.iter().zip(camera).all(|(a, b)| (a - b).abs() < 0.15), "{full_c:?} vs camera {camera:?}");
+}

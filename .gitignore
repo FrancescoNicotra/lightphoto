@@ -5,6 +5,7 @@
 # Sample RAW files are large and carry camera serial numbers
 /samples/*.dng
 /samples/*.DNG
+/samples/pixls/
 
 # Machine-specific build settings (short target-dir for MSVC MAX_PATH)
 /.cargo/config.toml

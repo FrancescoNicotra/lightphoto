@@ -153,8 +153,9 @@ mod tests {
     use super::*;
     use crate::color::{mul_vec, D50, D65};
 
-    // Realistic but made-up matrices for a two-illuminant (StdA, D65) profile.
-    // Forward matrix rows sum to the D50 white, as the DNG spec requires.
+    // A two-illuminant (StdA, D65) profile. CM_D65 is the GX80's real D65
+    // matrix; the others are made up. Forward matrix rows sum to the D50
+    // white, as the DNG spec requires.
     const CM_A: Mat3 = [[0.8550, -0.3708, 0.0129], [-0.4014, 1.1559, 0.2805], [-0.0442, 0.1159, 0.6436]];
     const CM_D65: Mat3 = [[0.7771, -0.3020, -0.0629], [-0.4029, 1.1950, 0.2345], [-0.0821, 0.1977, 0.6119]];
 
