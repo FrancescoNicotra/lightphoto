@@ -1,0 +1,17 @@
+# Build output
+/target
+/out
+
+# Sample RAW files are large and carry camera serial numbers
+/samples/*.dng
+/samples/*.DNG
+
+# Machine-specific build settings (short target-dir for MSVC MAX_PATH)
+/.cargo/config.toml
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

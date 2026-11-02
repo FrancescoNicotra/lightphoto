@@ -1,0 +1,8 @@
+[package]
+name = "lut"
+description = "3D LUTs: .cube/.3dl I/O and tetrahedral interpolation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

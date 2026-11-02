@@ -1,0 +1,10 @@
+[package]
+name = "xmp-dump"
+description = "Inspect Lightroom/Camera Raw presets (.xmp, .dng) and export embedded LUTs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xmp.workspace = true
+lut.workspace = true

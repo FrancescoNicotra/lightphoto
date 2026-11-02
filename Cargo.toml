@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/xmp", "crates/lut", "tools/xmp-dump"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+xmp = { path = "crates/xmp" }
+lut = { path = "crates/lut" }
+roxmltree = "0.20"
+flate2 = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

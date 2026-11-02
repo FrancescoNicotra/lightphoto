@@ -1,0 +1,10 @@
+[package]
+name = "xmp"
+description = "Parser/writer for Adobe XMP Camera Raw settings (crs:*) and embedded RGB tables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+roxmltree.workspace = true
+flate2.workspace = true
