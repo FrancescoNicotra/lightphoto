@@ -82,6 +82,15 @@ Decodifica del blob, implementata in `crates/xmp/src/rgb_table.rs` e verificata 
 
 I codici numerici delle primarie e della gamma vanno ancora confermati su un profilo reale esportato da Camera Raw. `xmp-dump --cube` estrae la tabella in un `.cube`.
 
+### LookTable dei profili Adobe Raw
+`Adobe Color.xmp` (nell'installazione di Lightroom) ha `crs:LookTable="E1095149…"` e accanto `crs:Table_E1095149…="<blob>"`, con lo stesso involucro base85 + zlib delle RGB table. Contenuto, little-endian, ricavato dalle dimensioni (tornano al byte):
+
+- `u32 0`, `u32 1` (versione), `u32` divisioni di tinta (36), saturazione (16), valore (16);
+- per ogni voce tre `f32`: spostamento di tinta in gradi, scala di saturazione, scala di valore. Ordine come `ProfileLookTableData` del DNG: valore esterno, poi tinta, saturazione più interna;
+- `u32` finale di codifica del valore (0 lineare, 1 sRGB).
+
+Implementato in `crates/xmp/src/look_table.rs` e applicato con `raw::hue_sat::HueSatMap`.
+
 ## 5. Perché un preset XMP non diventa una LUT
 
 | Operazione | Puntuale (LUT ok) | Note |

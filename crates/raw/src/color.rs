@@ -85,8 +85,11 @@ impl Xy {
 pub const D50: Xy = Xy::new(0.3457, 0.3585);
 pub const D65: Xy = Xy::new(0.3127, 0.3290);
 
-const PROPHOTO_PRIMARIES: [Xy; 3] = [Xy::new(0.7347, 0.2653), Xy::new(0.1596, 0.8404), Xy::new(0.0366, 0.0001)];
-const SRGB_PRIMARIES: [Xy; 3] = [Xy::new(0.64, 0.33), Xy::new(0.30, 0.60), Xy::new(0.15, 0.06)];
+pub const PROPHOTO_PRIMARIES: [Xy; 3] = [Xy::new(0.7347, 0.2653), Xy::new(0.1596, 0.8404), Xy::new(0.0366, 0.0001)];
+pub const SRGB_PRIMARIES: [Xy; 3] = [Xy::new(0.64, 0.33), Xy::new(0.30, 0.60), Xy::new(0.15, 0.06)];
+pub const ADOBE_RGB_PRIMARIES: [Xy; 3] = [Xy::new(0.64, 0.33), Xy::new(0.21, 0.71), Xy::new(0.15, 0.06)];
+pub const P3_PRIMARIES: [Xy; 3] = [Xy::new(0.680, 0.320), Xy::new(0.265, 0.690), Xy::new(0.150, 0.060)];
+pub const REC2020_PRIMARIES: [Xy; 3] = [Xy::new(0.708, 0.292), Xy::new(0.170, 0.797), Xy::new(0.131, 0.046)];
 
 /// RGB → XYZ for the given primaries, scaled so RGB (1,1,1) is `white` with Y = 1.
 pub fn rgb_to_xyz(primaries: [Xy; 3], white: Xy) -> Mat3 {
@@ -125,6 +128,12 @@ pub fn prophoto_to_srgb() -> Mat3 {
 
 pub fn srgb_to_prophoto() -> Mat3 {
     invert(&prophoto_to_srgb()).unwrap()
+}
+
+/// Linear ProPhoto → linear RGB with `primaries` and the same D50 white (no
+/// adaptation): the "D50-relative" spaces Camera Raw's tables live in.
+pub fn prophoto_to_d50_rgb(primaries: [Xy; 3]) -> Mat3 {
+    mul(&invert(&rgb_to_xyz(primaries, D50)).unwrap(), &prophoto_to_xyz())
 }
 
 /// sRGB transfer function, linear → encoded.

@@ -6,6 +6,7 @@
 //! the white point is adapted to D50 (or handled by the ForwardMatrix).
 
 use crate::color::{self, Mat3, TempTint, Vec3, Xy};
+use crate::hue_sat::HueSatMap;
 
 /// One calibration: a ColorMatrix (XYZ → camera) and, if the profile has one,
 /// a ForwardMatrix (white-balanced camera → XYZ D50), measured under a light
@@ -18,14 +19,25 @@ pub struct Calibration {
     pub forward_matrix: Option<Mat3>,
     /// Per-camera-unit correction (DNG CameraCalibration), identity if absent.
     pub camera_calibration: Mat3,
+    /// ProfileHueSatMapData for this illuminant (DCP / DNG profiles only).
+    pub hue_sat_map: Option<HueSatMap>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorProfile {
+    /// ProfileName, e.g. "Adobe Standard"; `None` for the file's own matrices.
+    pub name: Option<String>,
     /// One or two calibrations; with two, the first has the lower temperature.
     pub calibrations: Vec<Calibration>,
     /// DNG AnalogBalance, identity if absent.
     pub analog_balance: Mat3,
+    /// ProfileLookTableData: applied after exposure.
+    pub look_table: Option<HueSatMap>,
+    /// ProfileToneCurve, (x, y) pairs in 0..1 on linear values. `None` means
+    /// the DNG default (Adobe's "ACR3" curve).
+    pub tone_curve: Option<Vec<(f32, f32)>>,
+    /// Profile BaselineExposureOffset, added to the file's BaselineExposure.
+    pub baseline_exposure_offset: f64,
 }
 
 /// Temperature of the EXIF LightSource codes used by CalibrationIlluminant,
@@ -49,13 +61,26 @@ pub fn illuminant_temperature(code: u16) -> f64 {
 impl ColorProfile {
     pub fn new(mut calibrations: Vec<Calibration>, analog_balance: Option<Mat3>) -> Self {
         calibrations.sort_by(|a, b| a.temperature.total_cmp(&b.temperature));
-        ColorProfile { calibrations, analog_balance: analog_balance.unwrap_or(color::IDENTITY) }
+        ColorProfile {
+            name: None,
+            calibrations,
+            analog_balance: analog_balance.unwrap_or(color::IDENTITY),
+            look_table: None,
+            tone_curve: None,
+            baseline_exposure_offset: 0.0,
+        }
     }
 
     /// A profile with a single matrix, as the non-DNG decoders provide.
     pub fn from_color_matrix(color_matrix: Mat3, temperature: f64) -> Self {
         Self::new(
-            vec![Calibration { temperature, color_matrix, forward_matrix: None, camera_calibration: color::IDENTITY }],
+            vec![Calibration {
+                temperature,
+                color_matrix,
+                forward_matrix: None,
+                camera_calibration: color::IDENTITY,
+                hue_sat_map: None,
+            }],
             None,
         )
     }
@@ -64,13 +89,12 @@ impl ColorProfile {
         self.calibrations.iter().all(|c| c.forward_matrix.is_some())
     }
 
-    /// The calibration for a white point: linear in inverse temperature between
-    /// the two illuminants, clamped at the ends.
-    fn interpolated(&self, white: Xy) -> Calibration {
-        let first = &self.calibrations[0];
+    /// The two calibrations around a white point and the weight of the first:
+    /// linear in inverse temperature, clamped at the ends.
+    fn weight(&self, white: Xy) -> Option<(&Calibration, &Calibration, f64)> {
         let [lo, hi] = match self.calibrations.as_slice() {
             [a, b] if a.temperature > 0.0 && b.temperature > a.temperature => [a, b],
-            _ => return first.clone(),
+            _ => return None,
         };
         let t = TempTint::from_xy(white).temperature;
         let g = if t <= lo.temperature {
@@ -80,11 +104,31 @@ impl ColorProfile {
         } else {
             (1.0 / t - 1.0 / hi.temperature) / (1.0 / lo.temperature - 1.0 / hi.temperature)
         };
+        Some((lo, hi, g))
+    }
+
+    /// The calibration for a white point (matrices only).
+    fn interpolated(&self, white: Xy) -> Calibration {
+        let Some((lo, hi, g)) = self.weight(white) else {
+            return Calibration { hue_sat_map: None, ..self.calibrations[0].clone() };
+        };
         Calibration {
-            temperature: t,
+            temperature: TempTint::from_xy(white).temperature,
             color_matrix: color::lerp(&lo.color_matrix, &hi.color_matrix, g),
             forward_matrix: lo.forward_matrix.zip(hi.forward_matrix).map(|(a, b)| color::lerp(&a, &b, g)),
             camera_calibration: color::lerp(&lo.camera_calibration, &hi.camera_calibration, g),
+            hue_sat_map: None,
+        }
+    }
+
+    /// The HueSatMap for a white point, interpolated like the matrices.
+    pub fn hue_sat_map(&self, white: Xy) -> Option<HueSatMap> {
+        let Some((lo, hi, g)) = self.weight(white) else {
+            return self.calibrations.first()?.hue_sat_map.clone();
+        };
+        match (&lo.hue_sat_map, &hi.hue_sat_map) {
+            (Some(a), Some(b)) if a.same_shape(b) => Some(a.lerp(b, g)),
+            (a, b) => a.clone().or(b.clone()),
         }
     }
 
@@ -167,6 +211,7 @@ mod tests {
             color_matrix: cm,
             forward_matrix: forward.then_some(fm),
             camera_calibration: color::IDENTITY,
+            hue_sat_map: None,
         };
         // Deliberately out of order: `new` sorts by temperature.
         ColorProfile::new(vec![cal(6500.0, CM_D65, fm_d65), cal(2850.0, CM_A, fm_a)], None)

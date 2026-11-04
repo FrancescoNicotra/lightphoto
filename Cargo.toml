@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/xmp", "crates/lut", "crates/raw", "tools/xmp-dump", "tools/lumen-cli"]
+members = ["crates/xmp", "crates/lut", "crates/raw", "crates/pipeline", "crates/export", "tools/xmp-dump", "tools/lumen-cli", "tools/compare"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ license = "MIT"
 xmp = { path = "crates/xmp" }
 lut = { path = "crates/lut" }
 raw = { path = "crates/raw" }
+pipeline = { path = "crates/pipeline" }
+export = { path = "crates/export" }
 roxmltree = "0.20"
 flate2 = "1"
 rawler = "0.8"
@@ -26,4 +28,7 @@ codegen-units = 1
 opt-level = 3
 
 [profile.dev.package.raw]
+opt-level = 3
+
+[profile.dev.package.pipeline]
 opt-level = 3

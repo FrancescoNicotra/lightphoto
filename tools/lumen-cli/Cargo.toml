@@ -7,4 +7,7 @@ license.workspace = true
 
 [dependencies]
 raw.workspace = true
-image.workspace = true
+xmp.workspace = true
+lut.workspace = true
+pipeline.workspace = true
+export.workspace = true

@@ -9,8 +9,10 @@
 //! ```
 
 pub mod color;
+pub mod dcp;
 mod decode;
 pub mod demosaic;
+pub mod hue_sat;
 pub mod image;
 pub mod profile;
 
@@ -66,7 +68,7 @@ pub struct Photo {
 #[derive(Clone, Debug)]
 pub enum ColorSource {
     /// `data` is camera RGB and needs the profile and a white balance.
-    Camera(CameraData),
+    Camera(Box<CameraData>),
     /// `data` is already linear ProPhoto (JPEG/PNG/TIFF input).
     Working,
 }
@@ -89,6 +91,8 @@ pub struct PhotoInfo {
     pub f_number: Option<f64>,
     /// Millimetres.
     pub focal_length: Option<f64>,
+    /// EXIF DateTimeOriginal, "YYYY:MM:DD HH:MM:SS".
+    pub date_time: Option<String>,
     /// Already applied to `Photo::data`.
     pub orientation: Orientation,
     /// DNG BaselineExposure in EV: how much the camera underexposes on
@@ -118,6 +122,24 @@ impl Photo {
     /// JPEG/PNG/TIFF, chosen by extension.
     pub fn load(path: impl AsRef<Path>, opts: &DecodeOptions) -> Result<Photo, Error> {
         decode::load(path.as_ref(), opts)
+    }
+
+    /// Replaces the camera profile (e.g. with Adobe Standard from a .dcp),
+    /// keeping the as-shot neutral and recomputing the as-shot white point.
+    pub fn set_profile(&mut self, profile: ColorProfile) {
+        let ColorSource::Camera(cam) = &mut self.color else { return };
+        let white = profile.neutral_to_xy(cam.as_shot_neutral);
+        cam.profile = profile;
+        if let Some(raw) = &mut self.info.raw {
+            raw.as_shot_white = white;
+        }
+    }
+
+    pub fn camera_profile(&self) -> Option<&ColorProfile> {
+        match &self.color {
+            ColorSource::Camera(cam) => Some(&cam.profile),
+            ColorSource::Working => None,
+        }
     }
 
     /// The white point the camera recorded, for RAW files.

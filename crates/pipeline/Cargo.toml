@@ -1,0 +1,12 @@
+[package]
+name = "pipeline"
+description = "Develop pipeline: applies Camera Raw settings to decoded photos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xmp.workspace = true
+lut.workspace = true
+raw.workspace = true
+rayon.workspace = true

@@ -63,6 +63,7 @@ fn load_raw(path: &Path, opts: &DecodeOptions) -> Result<Photo, Error> {
         exposure_time: meta.as_ref().and_then(|m| m.exif.exposure_time).map(|r| r.n as f64 / r.d.max(1) as f64),
         f_number: meta.as_ref().and_then(|m| m.exif.fnumber).map(|r| r.n as f64 / r.d.max(1) as f64),
         focal_length: meta.as_ref().and_then(|m| m.exif.focal_length).map(|r| r.n as f64 / r.d.max(1) as f64),
+        date_time: meta.as_ref().and_then(|m| m.exif.date_time_original.clone()),
         orientation,
         baseline_exposure: dng.as_ref().and_then(|d| d.baseline_exposure).unwrap_or(0.0),
         raw: Some(RawInfo {
@@ -79,7 +80,7 @@ fn load_raw(path: &Path, opts: &DecodeOptions) -> Result<Photo, Error> {
     Ok(Photo {
         info,
         data: image,
-        color: ColorSource::Camera(CameraData { profile, as_shot_neutral: neutral }),
+        color: ColorSource::Camera(Box::new(CameraData { profile, as_shot_neutral: neutral })),
     })
 }
 
@@ -204,6 +205,7 @@ fn color_profile(raw: &RawImage, dng: Option<&DngTags>) -> Result<(ColorProfile,
                     color_matrix: cm,
                     forward_matrix: d.forward_matrices[i],
                     camera_calibration: d.camera_calibrations[i].unwrap_or(color::IDENTITY),
+                    hue_sat_map: None,
                 });
             }
             // A forward matrix is only usable if every calibration has one.
@@ -222,6 +224,7 @@ fn color_profile(raw: &RawImage, dng: Option<&DngTags>) -> Result<(ColorProfile,
                     color_matrix: to_mat3(&m[..9].iter().map(|&x| x as f64).collect::<Vec<_>>()),
                     forward_matrix: None,
                     camera_calibration: color::IDENTITY,
+                    hue_sat_map: None,
                 })
                 .collect();
             // Keep at most two, preferring the standard pair StdA + D65.

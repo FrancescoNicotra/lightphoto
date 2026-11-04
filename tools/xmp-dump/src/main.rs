@@ -4,8 +4,9 @@
 
 use std::process::ExitCode;
 
-use lut::Lut3D;
-use xmp::{DevelopSettings, Preset, RgbTable, Value, NS_CRS};
+use pipeline::colour::table_to_lut;
+use pipeline::Pipeline;
+use xmp::{DevelopSettings, Preset, Value, NS_CRS};
 
 struct Args {
     input: String,
@@ -94,23 +95,22 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(out) = &args.cube {
-        let table = s
-            .look
-            .as_ref()
-            .and_then(|l| l.rgb_table.as_ref())
-            .or(s.rgb_table.as_ref())
-            .ok_or(
-                "this preset has no embedded RGB table: it is purely parametric, so it can only \
-                 become a .cube once the develop pipeline exists (milestone M3)",
-            )?;
-        let title = format!(
-            "{} ({:?} primaries, {:?} gamma)",
-            preset.name.as_deref().unwrap_or("RGB table"),
-            table.primaries,
-            table.gamma
-        );
-        table_to_lut(table).write_cube(out, Some(&title))?;
-        println!("\nwrote {out}: {}^3, values are in the table's own space ({title})", table.divisions);
+        let table = s.look.as_ref().and_then(|l| l.rgb_table.as_ref()).or(s.rgb_table.as_ref());
+        if let Some(table) = table {
+            let title = format!(
+                "{} ({:?} primaries, {:?} gamma)",
+                preset.name.as_deref().unwrap_or("RGB table"),
+                table.primaries,
+                table.gamma
+            );
+            table_to_lut(table).write_cube(out, Some(&title))?;
+            println!("\nwrote {out}: {}^3, values are in the table's own space ({title})", table.divisions);
+        } else {
+            // A parametric preset: sample the point-wise part of the pipeline.
+            let title = format!("{} (point-wise part only)", preset.name.as_deref().unwrap_or("preset"));
+            Pipeline::to_cube(s, 33).write_cube(out, Some(&title))?;
+            println!("\nwrote {out}: 33^3, sRGB in / sRGB out; white balance and spatial effects are not included");
+        }
     }
 
     if let Some(out) = &args.sidecar {
@@ -118,27 +118,6 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("\nwrote {out}");
     }
     Ok(())
-}
-
-fn table_to_lut(t: &RgbTable) -> Lut3D {
-    let n = t.divisions as usize;
-    if t.dimensions == 1 {
-        return Lut3D::from_fn(n, |rgb| {
-            std::array::from_fn(|c| {
-                let i = (rgb[c] * (n - 1) as f32).round() as usize;
-                t.samples[i][c] as f32 / 65535.0
-            })
-        });
-    }
-    let mut lut = Lut3D::identity(n);
-    for b in 0..n {
-        for g in 0..n {
-            for r in 0..n {
-                lut.data[r + n * (g + n * b)] = t.sample(r, g, b);
-            }
-        }
-    }
-    lut
 }
 
 fn short(v: &Value) -> String {
@@ -160,6 +139,7 @@ fn short(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xmp::RgbTable;
 
     #[test]
     fn identity_table_becomes_identity_cube() {

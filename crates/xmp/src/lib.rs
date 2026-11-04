@@ -3,6 +3,7 @@
 //! See `docs/xmp-format.md` for the format notes behind this crate.
 
 mod container;
+pub mod look_table;
 mod packet;
 pub mod rgb_table;
 mod settings;
@@ -11,6 +12,7 @@ use std::path::Path;
 
 pub use container::extract_xmp;
 pub use packet::{Prop, Props, Value, XmpPacket, NS_CRS, NS_RDF};
+pub use look_table::LookTable;
 pub use rgb_table::RgbTable;
 pub use settings::*;
 

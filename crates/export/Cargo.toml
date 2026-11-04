@@ -1,0 +1,12 @@
+[package]
+name = "export"
+description = "Resize and encode developed photos (JPEG/PNG/TIFF, sRGB ICC, EXIF)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+raw.workspace = true
+pipeline.workspace = true
+image.workspace = true
+rayon.workspace = true

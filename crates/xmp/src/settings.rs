@@ -4,6 +4,7 @@
 //! settings are built as `DevelopSettings::default()` + `apply(preset)`.
 
 use crate::packet::{Props, Value, NS_CRS};
+use crate::look_table::{find_look_table, LookTable};
 use crate::rgb_table::RgbTable;
 use crate::Error;
 
@@ -235,6 +236,8 @@ pub struct Look {
     /// Settings the profile applies (camera profile, tone curve, tables).
     pub parameters: Props,
     pub rgb_table: Option<RgbTable>,
+    /// Hue/saturation table of the look (Adobe Color's, for instance).
+    pub look_table: Option<LookTable>,
 }
 
 impl Look {
@@ -248,6 +251,7 @@ impl Look {
             supports_amount: p.crs("SupportsAmount").and_then(Value::as_bool).unwrap_or(false),
             stubbed: p.crs("Stubbed").and_then(Value::as_bool).unwrap_or(false),
             rgb_table: find_rgb_table(&parameters)?,
+            look_table: find_look_table(&parameters)?,
             parameters,
         })
     }
@@ -258,6 +262,16 @@ impl Look {
         let mut s = DevelopSettings::default();
         s.apply(&self.parameters);
         s
+    }
+
+    /// Fills a referenced-only look from the profile file it names (for
+    /// example Camera Raw's own "Adobe Color.xmp"), keeping name and amount.
+    pub fn resolve_from(&mut self, profile: &Props) -> Result<(), Error> {
+        self.look_table = find_look_table(profile)?;
+        self.rgb_table = find_rgb_table(profile)?.or(self.rgb_table.take());
+        self.parameters = profile.clone();
+        self.stubbed = false;
+        Ok(())
     }
 
     /// Hash of an Adobe-internal hue/sat look table, if referenced.
