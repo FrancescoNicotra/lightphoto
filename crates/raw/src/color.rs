@@ -252,6 +252,66 @@ impl TempTint {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Colour difference
+
+/// CIE XYZ (D65, Y = 1) → CIELAB, D65 white.
+pub fn to_lab(xyz: [f32; 3]) -> [f32; 3] {
+    let w = D65.to_xyz();
+    let f = |t: f32| if t > 0.008_856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+    let [fx, fy, fz] = [f(xyz[0] / w[0] as f32), f(xyz[1]), f(xyz[2] / w[2] as f32)];
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIEDE2000 colour difference (Sharma, Wu, Dalal 2005).
+pub fn delta_e2000(l1: [f32; 3], l2: [f32; 3]) -> f32 {
+    let [l1, a1, b1] = l1.map(|v| v as f64);
+    let [l2, a2, b2] = l2.map(|v| v as f64);
+    let c_bar = (a1.hypot(b1) + a2.hypot(b2)) / 2.0;
+    let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25f64.powi(7))).sqrt());
+    let (a1p, a2p) = (a1 * (1.0 + g), a2 * (1.0 + g));
+    let (c1p, c2p) = (a1p.hypot(b1), a2p.hypot(b2));
+    let hue = |b: f64, a: f64| if a == 0.0 && b == 0.0 { 0.0 } else { b.atan2(a).to_degrees().rem_euclid(360.0) };
+    let (h1p, h2p) = (hue(b1, a1p), hue(b2, a2p));
+
+    let dl = l2 - l1;
+    let dc = c2p - c1p;
+    let dh = if c1p * c2p == 0.0 {
+        0.0
+    } else if (h2p - h1p).abs() <= 180.0 {
+        h2p - h1p
+    } else if h2p - h1p > 180.0 {
+        h2p - h1p - 360.0
+    } else {
+        h2p - h1p + 360.0
+    };
+    let dh_big = 2.0 * (c1p * c2p).sqrt() * (dh / 2.0).to_radians().sin();
+
+    let l_bar = (l1 + l2) / 2.0;
+    let c_bar_p = (c1p + c2p) / 2.0;
+    let h_bar = if c1p * c2p == 0.0 {
+        h1p + h2p
+    } else if (h1p - h2p).abs() <= 180.0 {
+        (h1p + h2p) / 2.0
+    } else if h1p + h2p < 360.0 {
+        (h1p + h2p + 360.0) / 2.0
+    } else {
+        (h1p + h2p - 360.0) / 2.0
+    };
+    let t = 1.0 - 0.17 * (h_bar - 30.0).to_radians().cos()
+        + 0.24 * (2.0 * h_bar).to_radians().cos()
+        + 0.32 * (3.0 * h_bar + 6.0).to_radians().cos()
+        - 0.20 * (4.0 * h_bar - 63.0).to_radians().cos();
+    let d_theta = 30.0 * (-((h_bar - 275.0) / 25.0).powi(2)).exp();
+    let rc = 2.0 * (c_bar_p.powi(7) / (c_bar_p.powi(7) + 25f64.powi(7))).sqrt();
+    let sl = 1.0 + 0.015 * (l_bar - 50.0).powi(2) / (20.0 + (l_bar - 50.0).powi(2)).sqrt();
+    let sc = 1.0 + 0.045 * c_bar_p;
+    let sh = 1.0 + 0.015 * c_bar_p * t;
+    let rt = -(2.0 * d_theta).to_radians().sin() * rc;
+    let (x, y, z) = (dl / sl, dc / sc, dh_big / sh);
+    (x * x + y * y + z * z + rt * y * z).sqrt() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +363,28 @@ mod tests {
             let back = TempTint::from_xy(TempTint { temperature: t, tint }.to_xy());
             assert!((back.temperature - t).abs() < t * 1e-3 && (back.tint - tint).abs() < 0.1, "{t} {tint} -> {back:?}");
         }
+    }
+
+    #[test]
+    fn matches_sharma_test_data() {
+        let cases = [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 3.1571, -77.2803], [50.0, 0.0, -82.7485], 2.8615),
+            ([50.0, 2.8361, -74.0200], [50.0, 0.0, -82.7485], 3.4412),
+            ([50.0, -1.3802, -84.2814], [50.0, 0.0, -82.7485], 1.0000),
+            ([50.0, 2.5, 0.0], [73.0, 25.0, -18.0], 27.1492),
+            ([2.0776, 0.0795, -1.1350], [0.9033, -0.0636, -0.5514], 0.9082),
+        ];
+        for (a, b, expected) in cases {
+            let d = delta_e2000(a, b);
+            assert!((d - expected).abs() < 1e-3, "{a:?} {b:?}: {d} != {expected}");
+        }
+    }
+
+    #[test]
+    fn white_is_lab_100() {
+        let to_xyz = to_f32(&rgb_to_xyz(SRGB_PRIMARIES, D65));
+        let l = to_lab(apply(&to_xyz, [1.0; 3]));
+        assert!((l[0] - 100.0).abs() < 1e-3 && l[1].abs() < 1e-2 && l[2].abs() < 1e-2, "{l:?}");
     }
 }

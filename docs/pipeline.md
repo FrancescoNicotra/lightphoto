@@ -22,7 +22,7 @@ Implementata nel crate [`pipeline`](../crates/pipeline). Ogni pannello di Camera
 | 12 | **Dehaze** | Melissa | modello globale a velo |
 | 13 | **Sharpening** | luma Melissa | unsharp mask: Radius, Detail (limite agli aloni), Masking (solo bordi) |
 | 14 | **Vignettatura post-crop** | Melissa | Amount, Midpoint, Roundness, Feather |
-| 15 | **HSL** | Rec.709 codificato → (Y, a, b) | 8 bande a pesi sovrapposti che sommano a 1. Hue ±100 = ±30°. La luminanza non tocca i grigi |
+| 15 | **HSL** | Rec.709 codificato → (Y, a, b) | 8 bande a pesi sovrapposti che sommano a 1. Hue ±100 = ±40°, Saturazione ±100 = ±13% di croma. La luminanza non tocca i grigi |
 | 16 | **Vibranza / Saturazione** | (Y, a, b) | la vibranza agisce di più sui colori spenti e protegge gli incarnati |
 | 17 | **Color grading** | (Y, a, b) | campane di luminanza per ombre/mezzitoni/luci (Blending ne regola la larghezza, Balance il centro), più la ruota globale |
 | 18 | **LUT .cube** (`--lut`) | sRGB codificato | per ultima, con amount |
@@ -50,6 +50,22 @@ Cartelle cercate: quelle in `LUMEN_ADOBE_DIR`; su macOS il bundle di Lightroom e
 ## Export `.cube`
 
 `lumen-cli cube preset.xmp -o out.cube` (oppure `xmp-dump preset.xmp --cube out.cube`) campiona le fasi 2, 5–9 e 15–17 in modalità "immagine già renderizzata", con ingresso e uscita sRGB. WB, operazioni spaziali e grana non entrano in una LUT.
+
+## Taratura contro Lightroom
+
+Le intensità degli slider sono state tarate su un render vero di Lightroom: la JPEG della fotocamera GX80 (`samples/pixls/P1010041-camera.jpg`) con "Dreamy days in spring" applicato da Lightroom 12 per iOS. Con una ricerca a coordinate che minimizza il ΔE2000 medio a 480 px (dove la grana, casuale, si media):
+
+| Costante | Prima | Tarata |
+|---|---|---|
+| Contrasto ±100 → esponente della curva | ±0,6 | ±0,25 |
+| Luci ±100 → spostamento massimo | ±0,15 | ±0,02 |
+| Ombre ±100 | ±0,15 | ±0,15 (invariata) |
+| HSL tinta ±100 | ±30° | ±40° |
+| HSL saturazione ±100 → croma | ±100% | ±13% |
+| HSL luminanza ±100 → luma | ±40% | ±80% |
+| Color grading saturazione 100 → croma aggiunta | 0,12 | 0,36 |
+
+Risultato: ΔE medio da 7,1 a **2,8** (test `matches_lightroom_on_the_camera_jpeg`). Limiti: è un'unica immagine con un unico preset, quindi alcune costanti possono compensarsi a vicenda (la saturazione HSL debolissima, per esempio, potrebbe nascondere un color grading o una vibranza diversi da quelli di Adobe). Per una taratura robusta servono export di Lightroom con **un solo slider alla volta**, che si possono fare gratis con le JPEG. Sui RAW resta da verificare: Luci/Ombre in Adobe sono locali e agiscono in modo diverso sui file a gamma dinamica estesa.
 
 ## Verifica
 

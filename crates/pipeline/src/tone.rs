@@ -115,7 +115,8 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 
 /// Contrast, Highlights, Shadows, Whites, Blacks (−100..100 each).
 pub fn basic(b: &Basic) -> Lut1 {
-    let k = 1.0 + b.contrast / 100.0 * 0.6;
+    // Strengths fitted against Lightroom (see docs/pipeline.md, "Taratura").
+    let k = 1.0 + b.contrast / 100.0 * 0.25;
     // v·(1−v)³ peaks at 0.25, v³·(1−v) at 0.75; both normalised to peak 1.
     let shadows = |v: f32| v * (1.0 - v).powi(3) / 0.1055;
     let highlights = |v: f32| v.powi(3) * (1.0 - v) / 0.1055;
@@ -127,7 +128,7 @@ pub fn basic(b: &Basic) -> Lut1 {
         } else {
             1.0 - (1.0 - MID_GREY) * ((1.0 - v) / (1.0 - MID_GREY)).powf(k)
         };
-        v += b.highlights / 100.0 * 0.15 * highlights(v);
+        v += b.highlights / 100.0 * 0.02 * highlights(v);
         v += b.shadows / 100.0 * 0.15 * shadows(v);
         v += b.whites / 100.0 * 0.15 * v.powi(4);
         v += b.blacks / 100.0 * 0.06 * (1.0 - v).powi(4);
@@ -255,7 +256,7 @@ mod tests {
         let shadows = Basic { shadows: 50.0, ..Default::default() };
         assert!(at(shadows.clone(), 0.25) > 0.27 && (at(shadows, 0.9) - 0.9).abs() < 0.01);
         let highlights = Basic { highlights: -50.0, ..Default::default() };
-        assert!(at(highlights.clone(), 0.75) < 0.72 && (at(highlights, 0.1) - 0.1).abs() < 0.01);
+        assert!(at(highlights.clone(), 0.75) < 0.745 && (at(highlights, 0.1) - 0.1).abs() < 0.01);
         assert!(at(Basic { blacks: 100.0, ..Default::default() }, 0.0) > 0.05);
         assert!(at(Basic { whites: -100.0, ..Default::default() }, 1.0) < 0.9);
     }

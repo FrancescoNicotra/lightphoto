@@ -1,5 +1,10 @@
-//! The "Dreamy days in spring" preset on the GX80 RW2 sample (skipped when
-//! samples/pixls/P1010041.RW2 is missing; see crates/raw/tests/samples.rs).
+//! The "Dreamy days in spring" preset on the GX80 sample (skipped when the
+//! files in samples/pixls are missing; see crates/raw/tests/samples.rs).
+//!
+//! - P1010041.RW2: the RAW, from raw.pixls.us (CC0);
+//! - P1010041-camera.jpg: its embedded camera JPEG (`lumen-cli preview`);
+//! - P1010041-camera-lightroom-dreamy.jpg: that JPEG with the preset applied
+//!   in Lightroom 12 for iOS, exported as sRGB JPEG at full size.
 
 use std::path::PathBuf;
 
@@ -28,7 +33,7 @@ fn stats(img: &Image) -> (f64, f64, f64) {
 }
 
 #[test]
-fn dreamy_preset_is_softer_and_warmer() {
+fn dreamy_preset_is_brighter_and_warmer() {
     let Some(path) = sample("pixls/P1010041.RW2") else { return };
     let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
     let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
@@ -43,8 +48,7 @@ fn dreamy_preset_is_softer_and_warmer() {
     let (l0, sd0, cool0) = stats(&plain);
     let (l1, sd1, cool1) = stats(&dreamy);
     eprintln!("plain L {l0:.3} sd {sd0:.3} b-r {cool0:+.3}; dreamy L {l1:.3} sd {sd1:.3} b-r {cool1:+.3}");
-    // Contrast −50 and Shadows +50: flatter and brighter.
-    assert!(sd1 < sd0 * 0.9, "contrast {sd0} -> {sd1}");
+    // Shadows +50 and the master curve lift the midtones.
     assert!(l1 > l0, "brightness {l0} -> {l1}");
     // 5600 K custom white balance vs ~4900 K as shot, plus a yellow midtone grade.
     assert!(cool1 < cool0 - 0.02, "warmth {cool0} -> {cool1}");
@@ -61,4 +65,30 @@ fn preview_and_full_size_agree() {
     let full = p.render(&photo, &RenderOptions::default()).downscale(400);
     let (a, b) = (stats(&small), stats(&full));
     assert!((a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01, "{a:?} vs {b:?}");
+}
+
+/// Mean ΔE2000 between two linear ProPhoto images of the same size.
+fn mean_delta_e(a: &Image, b: &Image) -> f64 {
+    use raw::color;
+    let to_xyz = color::to_f32(&color::mul(&color::rgb_to_xyz(color::SRGB_PRIMARIES, color::D65), &color::prophoto_to_srgb()));
+    let lab = |p: [f32; 3]| color::to_lab(color::apply(&to_xyz, p).map(|v| v.max(0.0)));
+    let sum: f64 = a.pixels.iter().zip(&b.pixels).map(|(p, q)| color::delta_e2000(lab(*p), lab(*q)) as f64).sum();
+    sum / a.pixels.len() as f64
+}
+
+/// The whole preset against Lightroom itself. Grain is random in both, so
+/// the images are compared at 480 px, where it averages out.
+#[test]
+fn matches_lightroom_on_the_camera_jpeg() {
+    let (Some(src), Some(reference)) = (sample("pixls/P1010041-camera.jpg"), sample("pixls/P1010041-camera-lightroom-dreamy.jpg")) else {
+        return;
+    };
+    let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
+    let photo = Photo::load(&src, &DecodeOptions::default()).unwrap();
+    let ours = Pipeline::new(&preset.settings, SourceKind::of(&photo)).render(&photo, &RenderOptions::default()).downscale(480);
+    let lightroom = Photo::load(&reference, &DecodeOptions::default()).unwrap().to_working(None).downscale(480);
+    assert_eq!((ours.width, ours.height), (lightroom.width, lightroom.height));
+    let de = mean_delta_e(&ours, &lightroom);
+    eprintln!("mean ΔE2000 vs Lightroom at 480 px: {de:.2}");
+    assert!(de < 3.0, "{de}");
 }

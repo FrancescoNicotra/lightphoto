@@ -173,9 +173,12 @@ impl ColourOps {
         if let Some(hsl) = &self.hsl {
             let w = band_weights(hue);
             let dot = |v: &[f32; 8]| w.iter().zip(v).map(|(w, v)| w * v / 100.0).sum::<f32>();
-            hue += dot(&hsl.hue) * 30.0;
-            chroma *= (1.0 + dot(&hsl.saturation)).max(0.0);
-            y *= 1.0 + dot(&hsl.luminance) * 0.4 * colourful;
+            // Strengths fitted against Lightroom (docs/pipeline.md, "Taratura").
+            hue += dot(&hsl.hue) * 40.0;
+            // Lightroom's per-band saturation is much gentler than a plain
+            // chroma scale (fitted: −30 is about −4%).
+            chroma *= (1.0 + dot(&hsl.saturation) * 0.13).max(0.0);
+            y *= 1.0 + dot(&hsl.luminance) * 0.8 * colourful;
         }
         if self.vibrance != 0.0 {
             // Strongest on muted colours, gentler on skin tones (reds–yellows).
@@ -193,7 +196,7 @@ impl ColourOps {
             for (wheel, weight) in grade_weights(g, y) {
                 if wheel.sat != 0.0 {
                     let th = wheel.hue.to_radians();
-                    let k = weight * wheel.sat / 100.0 * 0.12;
+                    let k = weight * wheel.sat / 100.0 * 0.36;
                     a += k * th.cos();
                     b += k * th.sin();
                 }
@@ -352,9 +355,13 @@ mod tests {
         let mut hsl = Hsl::default();
         hsl.saturation[3] = -100.0; // greens
         let ops = ColourOps::new(&hsl, 0.0, 0.0, &ColorGrade::default());
-        let green = ops.apply([0.2, 0.7, 0.2]); // hue 120°
-        let [_, a, b] = to_yab(green);
-        assert!(a.hypot(b) < 0.02, "{green:?}");
+        let chroma = |p: [f32; 3]| {
+            let [_, a, b] = to_yab(p);
+            a.hypot(b)
+        };
+        let green = [0.2, 0.7, 0.2]; // hue 120°
+        let out = ops.apply(green);
+        assert!(chroma(out) < chroma(green) * 0.95, "{out:?}");
         let blue = [0.2, 0.3, 0.8];
         assert!(close(ops.apply(blue), blue, 1e-4));
         let grey = [0.5; 3];
