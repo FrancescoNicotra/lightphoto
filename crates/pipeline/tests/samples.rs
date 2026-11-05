@@ -37,7 +37,7 @@ fn dreamy_preset_is_brighter_and_warmer() {
     let Some(path) = sample("pixls/P1010041.RW2") else { return };
     let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
     let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
-    let opts = RenderOptions { max_size: Some(800) };
+    let opts = RenderOptions { max_size: Some(800), ..Default::default() };
 
     let plain = Pipeline::new(&DevelopSettings::default(), SourceKind::Raw).render(&photo, &opts);
     let dreamy_pipeline = Pipeline::new(&preset.settings, SourceKind::Raw);
@@ -61,7 +61,7 @@ fn preview_and_full_size_agree() {
     let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
     let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
     let p = Pipeline::new(&preset.settings, SourceKind::Raw);
-    let small = p.render(&photo, &RenderOptions { max_size: Some(400) });
+    let small = p.render(&photo, &RenderOptions { max_size: Some(400), ..Default::default() });
     let full = p.render(&photo, &RenderOptions::default()).downscale(400);
     let (a, b) = (stats(&small), stats(&full));
     assert!((a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01, "{a:?} vs {b:?}");

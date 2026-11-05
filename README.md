@@ -2,7 +2,7 @@
 
 Editor RAW stile Lightroom in Rust, capace di applicare preset Lightroom/Camera Raw (`.xmp`, `.dng` mobile) e LUT `.cube`/`.3dl`.
 
-## Stato: milestone M3
+## Stato: milestone M4 (MVP desktop)
 
 | Crate | Contenuto |
 |---|---|
@@ -11,6 +11,7 @@ Editor RAW stile Lightroom in Rust, capace di applicare preset Lightroom/Camera 
 | `crates/raw` | decodifica RAW con `rawler` (DNG, CR2/CR3, NEF, ARW, RW2, RAF…) e JPEG/PNG/TIFF; black/white level, demosaic bilineare (Bayer e X-Trans) o half-size, crop di default, orientamento; modello colore DNG (ColorMatrix/ForwardMatrix interpolate per temperatura, CameraCalibration, AnalogBalance) → **ProPhoto lineare**; temperatura/tinta su scala Camera Raw; preview incorporata |
 | `crates/pipeline` | applica i preset: WB (assoluta/relativa), calibrazione, esposizione, profilo (curva Adobe Color, tabelle RGB), Base, curve parametrica e a punti, HSL, vibranza/saturazione, color grading, Texture/Clarity/Dehaze, sharpening, NR colore, vignettatura, grana, LUT `.cube`; export `.cube` della parte puntuale. Dettagli e limiti in [docs/pipeline.md](docs/pipeline.md) |
 | `crates/export` | dimensioni (originale, lato lungo, %, box), Lanczos3 in lineare, grana dopo il resize, JPEG 8 bit / PNG e TIFF 16 bit con profilo ICC sRGB, EXIF essenziali, template dei nomi |
+| `crates/app` | **app desktop** `lumen` (egui/wgpu): preset a sinistra con anteprima al passaggio, foto con adatta/100%, pan, zoom, prima/dopo e istogramma, pannelli di sviluppo a destra, filmstrip, undo/redo, sidecar `.xmp`, export in background. Dettagli in [docs/app.md](docs/app.md) |
 | `tools/xmp-dump` | CLI di ispezione dei preset (`--cube` ora funziona anche sui preset parametrici) |
 | `tools/lumen-cli` | `info`, `develop` (anche batch), `preview`, `cube` |
 | `tools/compare` | ΔE2000 tra il nostro render e un riferimento, con mappa delle differenze |
@@ -18,6 +19,17 @@ Editor RAW stile Lightroom in Rust, capace di applicare preset Lightroom/Camera 
 Le note di formato sono in [docs/xmp-format.md](docs/xmp-format.md).
 
 ## Uso
+
+### App
+
+```bash
+cargo run --release -p app                                    # riapre l'ultima cartella
+cargo run --release -p app -- samples/pixls/P1010041.RW2 --presets samples
+```
+
+File → Apri cartella (⌘O / Ctrl+O) apre una cartella di RAW/JPEG; la filmstrip in basso le mostra tutte. Scegli la cartella dei preset (`.xmp`, `.dng` "mobile", `.cube`) con il pulsante **Cartella…** a sinistra: passando sopra un preset l'anteprima lo mostra, il clic lo applica. Gli slider aggiornano l'anteprima mentre li trascini; doppio clic per azzerarli, clic sul numero per scriverlo. `\` prima/dopo, ⌘Z / ⇧⌘Z (Ctrl+Z / Ctrl+Shift+Z) annulla e ripeti, ⌘S salva il sidecar `.xmp` accanto al RAW, ⇧⌘E (Ctrl+Shift+E) esporta. Tutte le scorciatoie e come funziona il rendering in [docs/app.md](docs/app.md).
+
+### Riga di comando
 
 ```bash
 cargo run -p xmp-dump -- "samples/Dreamy days in spring.xmp"
@@ -54,8 +66,8 @@ Il piano completo è in [plan/PIANO.md](plan/PIANO.md). I file di esempio (`samp
 ## Prossimi passi
 
 - **Verifica M3 contro Lightroom**: con il DNG "mobile version" (preview renderizzata da Lightroom con il preset), target ΔE medio < 3.
-- **M4**: UI egui.
 - Dopo l'MVP: Luci/Ombre e Clarity locali (guided filter), NR luminanza, correzione lenti, demosaic migliore, GPU.
+- App: ritaglio e raddrizzamento, catalogo con salvataggio automatico delle modifiche, miniature con l'orientamento EXIF, export di più foto insieme.
 
 ## Licenze
 

@@ -67,6 +67,11 @@ impl SourceKind {
 pub struct RenderOptions {
     /// Downscale so the long edge is at most this, before processing.
     pub max_size: Option<usize>,
+    /// Long edge of the full-size photo, when `photo` is already a reduced
+    /// copy (an app's preview). Pixel radii (sharpening, noise reduction)
+    /// are scaled from it. RAW files know it from their crop; defaults to
+    /// the photo's own size otherwise.
+    pub full_size: Option<usize>,
 }
 
 /// The parts of a camera profile (.dcp) that act on pixels, for one photo
@@ -241,7 +246,9 @@ impl Pipeline {
         let white = self.white_point(photo);
         let img = src.to_working(white);
         // Pixel radii are given for the full-size image.
-        let full = photo.info.raw.as_ref().map_or(photo.data.width.max(photo.data.height), |r| r.crop[2].max(r.crop[3]));
+        let full = opts.full_size.unwrap_or_else(|| {
+            photo.info.raw.as_ref().map_or(photo.data.width.max(photo.data.height), |r| r.crop[2].max(r.crop[3]))
+        });
         let px = img.width.max(img.height) as f32 / full as f32;
         let stage = self.profile_stage(photo, white);
         self.process_with(img, self.exposure(photo) + stage.exposure_offset, px, &stage)

@@ -282,7 +282,7 @@ fn develop(args: &Args) -> CliResult<()> {
         }
         let (w, h) = args.size.dimensions(photo.data.width, photo.data.height);
         let max_size = args.fast.then_some(w.max(h));
-        let rendered = pipeline.render(&photo, &RenderOptions { max_size });
+        let rendered = pipeline.render(&photo, &RenderOptions { max_size, ..Default::default() });
         let t_render = t.elapsed() - t_decode;
 
         let path = if to_dir {

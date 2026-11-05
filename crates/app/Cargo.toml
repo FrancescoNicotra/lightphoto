@@ -1,0 +1,21 @@
+[package]
+name = "app"
+description = "Lumen desktop app: Lightroom-style develop UI (egui)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+[dependencies]
+raw.workspace = true
+xmp.workspace = true
+lut.workspace = true
+pipeline.workspace = true
+export.workspace = true
+image.workspace = true
+# Default features: wgpu backend, winit (x11 + wayland on Linux), accesskit.
+eframe = { version = "0.37", features = ["persistence"] }
+rfd = "0.17"
