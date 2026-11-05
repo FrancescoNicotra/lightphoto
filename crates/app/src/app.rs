@@ -540,9 +540,12 @@ impl LumenApp {
 
     fn menu(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // ⌘ on macOS, Ctrl elsewhere.
+        let keys = |m: Modifiers, k: Key| ctx.format_shortcut(&KeyboardShortcut::new(m, k));
+        let (cmd, shift) = (Modifiers::COMMAND, Modifiers::COMMAND | Modifiers::SHIFT);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("Apri cartella…   ⌘O").clicked() {
+                if ui.add(egui::Button::new("Apri cartella…").shortcut_text(keys(cmd, Key::O))).clicked() {
                     ui.close();
                     self.pick_folder(&ctx);
                 }
@@ -560,11 +563,11 @@ impl LumenApp {
                 }
                 ui.separator();
                 let raw = self.current.as_ref().is_some_and(|c| state::sidecar_path(&c.path).is_some());
-                if ui.add_enabled(raw, egui::Button::new("Salva impostazioni (.xmp)   ⌘S")).clicked() {
+                if ui.add_enabled(raw, egui::Button::new("Salva impostazioni (.xmp)").shortcut_text(keys(cmd, Key::S))).clicked() {
                     ui.close();
                     self.save_sidecar();
                 }
-                if ui.add_enabled(self.current.is_some(), egui::Button::new("Esporta…   ⇧⌘E")).clicked() {
+                if ui.add_enabled(self.current.is_some(), egui::Button::new("Esporta…").shortcut_text(keys(shift, Key::E))).clicked() {
                     ui.close();
                     self.export_open = true;
                 }
@@ -575,11 +578,11 @@ impl LumenApp {
             });
             ui.menu_button("Modifica", |ui| {
                 let (can_undo, can_redo) = self.current.as_ref().map_or((false, false), |c| (c.history.can_undo(&c.edit), c.history.can_redo()));
-                if ui.add_enabled(can_undo, egui::Button::new("Annulla   ⌘Z")).clicked() {
+                if ui.add_enabled(can_undo, egui::Button::new("Annulla").shortcut_text(keys(cmd, Key::Z))).clicked() {
                     ui.close();
                     self.undo();
                 }
-                if ui.add_enabled(can_redo, egui::Button::new("Ripeti   ⇧⌘Z")).clicked() {
+                if ui.add_enabled(can_redo, egui::Button::new("Ripeti").shortcut_text(keys(shift, Key::Z))).clicked() {
                     ui.close();
                     self.redo();
                 }
@@ -594,11 +597,11 @@ impl LumenApp {
                     ui.close();
                     self.viewer.zoom = viewer::Zoom::Fit;
                 }
-                if ui.button("100%   Z").clicked() {
+                if ui.add(egui::Button::new("100%").shortcut_text("Z")).clicked() {
                     ui.close();
                     self.viewer.zoom = viewer::Zoom::Ratio(1.0);
                 }
-                if ui.button("Prima / Dopo   \\").clicked() {
+                if ui.add(egui::Button::new("Prima / Dopo").shortcut_text("\\")).clicked() {
                     ui.close();
                     self.viewer.show_before = !self.viewer.show_before;
                 }

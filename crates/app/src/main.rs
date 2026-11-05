@@ -3,6 +3,9 @@
 //!
 //! usage: lumen [folder | photo] [--presets folder]
 
+// No console window next to the app in Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod export_ui;
 mod library;
