@@ -41,6 +41,7 @@ A preset only contains the keys it wants to set. It is applied as `current setti
 | Detail | `Sharpness`, `SharpenRadius`, `SharpenDetail`, `SharpenEdgeMasking`, `LuminanceSmoothing`, `ColorNoiseReduction*` | |
 | Effects | `GrainAmount`, `GrainSize`, `GrainFrequency` (= Roughness), `GrainSeed`, `PostCropVignette*` | |
 | Profile | `crs:Look` (struct), `CameraProfile`, `CameraProfileDigest` | see §4 |
+| Crop | `HasCrop` (`True`/`False`), `CropTop`, `CropLeft`, `CropBottom`, `CropRight`, `CropAngle` | fractions 0..1 in the file's stored orientation (before the EXIF rotation); angle in degrees ±45 |
 
 Colour grading (PV5) **reuses the split toning keys** for the hue and saturation of shadows and highlights. The `ColorGrade*` keys only exist for midtones, luminances, global and blending.
 

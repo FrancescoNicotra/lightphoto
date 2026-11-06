@@ -280,7 +280,8 @@ fn develop(args: &Args) -> CliResult<()> {
         if let Some(c) = &cube {
             pipeline = pipeline.with_cube(c.clone(), args.lut_amount);
         }
-        let (w, h) = args.size.dimensions(photo.data.width, photo.data.height);
+        let (cw, ch) = pipeline::geometry::cropped_size(photo.data.width, photo.data.height, &settings.crop, photo.info.orientation);
+        let (w, h) = args.size.dimensions(cw, ch);
         let max_size = args.fast.then_some(w.max(h));
         let rendered = pipeline.render(&photo, &RenderOptions { max_size, ..Default::default() });
         let t_render = t.elapsed() - t_decode;

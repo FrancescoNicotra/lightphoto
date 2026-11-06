@@ -7,6 +7,7 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 | # | Stage | Space | Notes |
 |---|---|---|---|
 | 1 | **White balance** | camera → linear ProPhoto | `As Shot`, `Custom` (absolute Temperature/Tint through the DNG matrices), named presets (Daylight, Cloudy…), `Auto` (grey world). On JPEG/TIFF: `IncrementalTemperature/Tint` (±100 mired). |
+| 1a | **Straighten / crop** | linear ProPhoto | `CropAngle` turns the oriented photo about its centre (bilinear), then `CropTop/Left/Bottom/Right` cut the frame ([`geometry.rs`](../crates/pipeline/src/geometry.rs)). Done first, so the post-crop vignette and every spatial stage see the final frame |
 | 1b | **Camera profile HueSatMap** | linear ProPhoto | only with an Adobe DCP (see below), interpolated between the two illuminants like the matrices |
 | 2 | **Calibration** | linear 3×3 matrix | each Rec.709 primary rotated in hue (±100 ≈ ±25°) and scaled in saturation; white stays white |
 | 3 | **Exposure** | linear | `Exposure2012` + the DNG `BaselineExposure` |

@@ -2,7 +2,8 @@
 //! to a decoded photo, in Camera Raw's order:
 //!
 //! ```text
-//! linear ProPhoto (white balanced) ─ calibration ─ exposure ─ shoulder (raw)
+//! linear ProPhoto (white balanced) ─ straighten/crop
+//!   ─ calibration ─ exposure ─ shoulder (raw)
 //!   → Melissa: profile curve ─ profile RGB table ─ Basic tone ─ parametric
 //!     ─ point curves ─ shadow tint                                  (pass A)
 //!   → colour NR ─ Texture/Clarity ─ Dehaze ─ sharpening ─ vignette  (spatial)
@@ -13,6 +14,7 @@
 pub mod acr3;
 pub mod adobe;
 pub mod colour;
+pub mod geometry;
 pub mod local;
 pub mod tone;
 
@@ -250,6 +252,9 @@ impl Pipeline {
             photo.info.raw.as_ref().map_or(photo.data.width.max(photo.data.height), |r| r.crop[2].max(r.crop[3]))
         });
         let px = img.width.max(img.height) as f32 / full as f32;
+        // Cropping first: the post-crop vignette and the other spatial
+        // operations then see the final frame.
+        let img = geometry::apply(img, &self.settings.crop, photo.info.orientation);
         let stage = self.profile_stage(photo, white);
         self.process_with(img, self.exposure(photo) + stage.exposure_offset, px, &stage)
     }
@@ -436,6 +441,23 @@ mod tests {
         // Clipped highlights land near white, not beyond.
         let white = p.point([4.0; 3], 0.0);
         assert!(white.iter().all(|v| *v > 0.97 && *v <= 1.0), "{white:?}");
+    }
+
+    #[test]
+    fn crop_comes_before_the_vignette() {
+        let photo = Photo { info: raw::PhotoInfo::default(), data: Image::from_fn(200, 100, |_, _| [0.5; 3]), color: ColorSource::Working };
+        let mut s = DevelopSettings::default();
+        s.detail.sharpness = 0.0;
+        s.detail.color_nr = 0.0;
+        s.effects.vignette_amount = -100.0;
+        s.crop = xmp::Crop { has_crop: true, top: 0.0, left: 0.5, bottom: 1.0, right: 1.0, angle: 0.0 };
+        let out = Pipeline::new(&s, SourceKind::Rendered).render(&photo, &RenderOptions::default());
+        assert_eq!((out.width, out.height), (100, 100));
+        // Darkened at the corners of the cropped frame, not of the original.
+        let (corner, centre) = (out.get(1, 1)[1], out.get(50, 50)[1]);
+        assert!(corner < centre * 0.6, "{corner} {centre}");
+        let (left_edge, right_edge) = (out.get(1, 50)[1], out.get(98, 50)[1]);
+        assert!((left_edge - right_edge).abs() < 0.02, "{left_edge} {right_edge}");
     }
 
     #[test]

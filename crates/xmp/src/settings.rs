@@ -222,6 +222,35 @@ impl Default for Effects {
     }
 }
 
+/// Crop and straighten. The rectangle is in fractions of the image, in
+/// the file's stored orientation (before the EXIF rotation, as Camera Raw
+/// keeps it), taken after the image is rotated by `angle` degrees about its
+/// centre.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Crop {
+    pub has_crop: bool,
+    pub top: f32,
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    /// Straighten angle in degrees, −45..45; positive turns the picture
+    /// clockwise.
+    pub angle: f32,
+}
+
+impl Default for Crop {
+    fn default() -> Self {
+        Crop { has_crop: false, top: 0.0, left: 0.0, bottom: 1.0, right: 1.0, angle: 0.0 }
+    }
+}
+
+impl Crop {
+    /// Whether the crop changes the picture at all.
+    pub fn is_active(&self) -> bool {
+        self.has_crop && (self.angle != 0.0 || self.top > 0.0 || self.left > 0.0 || self.bottom < 1.0 || self.right < 1.0)
+    }
+}
+
 /// A profile ("Look"): a named bundle of parameters that may carry an RGB
 /// table (creative profiles) or reference Adobe-internal tables by hash.
 #[derive(Clone, Debug, PartialEq)]
@@ -308,6 +337,7 @@ pub struct DevelopSettings {
     pub calibration: Calibration,
     pub detail: Detail,
     pub effects: Effects,
+    pub crop: Crop,
     pub look: Option<Look>,
     /// Profile-level RGB table when the preset *is* a profile.
     pub rgb_table: Option<RgbTable>,
@@ -331,6 +361,7 @@ impl Default for DevelopSettings {
             calibration: Calibration::default(),
             detail: Detail::default(),
             effects: Effects::default(),
+            crop: Crop::default(),
             look: None,
             rgb_table: None,
         }
@@ -407,6 +438,11 @@ scalar_keys! {
     "PostCropVignetteMidpoint" => effects.vignette_midpoint;
     "PostCropVignetteRoundness" => effects.vignette_roundness;
     "PostCropVignetteFeather" => effects.vignette_feather;
+    "CropTop" => crop.top;
+    "CropLeft" => crop.left;
+    "CropBottom" => crop.bottom;
+    "CropRight" => crop.right;
+    "CropAngle" => crop.angle;
 }
 
 const CURVE_KEYS: [&str; 4] = ["ToneCurvePV2012", "ToneCurvePV2012Red", "ToneCurvePV2012Green", "ToneCurvePV2012Blue"];
@@ -481,6 +517,9 @@ impl DevelopSettings {
         if let Some(t) = props.crs("Tint").and_then(Value::as_f32) {
             self.tint = Some(t);
         }
+        if let Some(c) = props.crs("HasCrop").and_then(Value::as_bool) {
+            self.crop.has_crop = c;
+        }
     }
 
     /// Writes every typed setting into `props` (sidecar style: complete,
@@ -505,6 +544,7 @@ impl DevelopSettings {
         for (key, v) in scalars(self) {
             props.set_crs(key, num(v));
         }
+        props.set_crs("HasCrop", Value::Text(if self.crop.has_crop { "True" } else { "False" }.into()));
         for (i, band) in HSL_BANDS.iter().enumerate() {
             props.set_crs(&format!("HueAdjustment{band}"), num(self.hsl.hue[i]));
             props.set_crs(&format!("SaturationAdjustment{band}"), num(self.hsl.saturation[i]));
@@ -523,7 +563,7 @@ impl DevelopSettings {
     /// (or is preset metadata). Used to report what is still unmapped.
     pub fn is_known_key(key: &str) -> bool {
         const OTHER: &[&str] = &[
-            "ProcessVersion", "WhiteBalance", "Temperature", "Tint", "ToneCurveName2012", "Look", "RGBTable",
+            "ProcessVersion", "WhiteBalance", "Temperature", "Tint", "ToneCurveName2012", "Look", "RGBTable", "HasCrop",
             "Name", "ShortName", "SortName", "Group", "Description", "UUID", "PresetType", "Cluster", "Version",
             "HasSettings", "Copyright", "ContactInfo", "CameraModelRestriction", "SupportsAmount", "SupportsAmount2",
             "SupportsColor", "SupportsMonochrome", "SupportsHighDynamicRange", "SupportsNormalDynamicRange",

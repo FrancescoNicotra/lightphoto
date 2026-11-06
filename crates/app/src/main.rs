@@ -7,7 +7,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod auto;
 mod blend;
+mod crop_tool;
 mod export_ui;
 mod i18n;
 mod library;

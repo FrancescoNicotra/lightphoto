@@ -24,6 +24,13 @@
 //! select all | none | <n>,<m>… | add <n> | range <n>
 //!                           filmstrip selection (as ⌘A, click, ⌘-click, ⇧-click)
 //! copy | paste              copy the open photo's settings, paste to the selection
+//! crop [<l> <t> <r> <b>] [angle <deg>] [aspect <n> [portrait]]
+//!                           open the crop tool and set it (fractions of the photo,
+//!                           aspect index as in the tool's list)
+//! cropdone | cropcancel     close the crop tool
+//! compare off|split|side    before/after view
+//! pick <u> <v>              white balance eyedropper at (u, v) of the shown photo
+//! auto                      Auto tone
 //! shot <file.png>           save a screenshot of the window
 //! quit
 //! ```
@@ -82,6 +89,11 @@ pub enum Step {
     Paste,
     Amount(f32),
     ExportDir(PathBuf),
+    Crop { rect: Option<pipeline::geometry::Rect>, angle: Option<f32>, aspect: Option<(usize, bool)> },
+    CropDone(bool),
+    Compare(crate::viewer::Compare),
+    Pick(f32, f32),
+    Auto,
     Quit,
 }
 
@@ -134,7 +146,7 @@ impl Script {
         }
         self.steps.pop_front();
         // Let panel animations finish before the next screenshot.
-        let ms = if matches!(cmd, "panel" | "tab" | "exportdialog" | "closedialog") { 600 } else { 50 };
+        let ms = if matches!(cmd, "panel" | "tab" | "exportdialog" | "closedialog" | "compare" | "crop" | "cropdone") { 600 } else { 50 };
         self.pause_until = Instant::now() + Duration::from_millis(ms);
         eprintln!("script: {line}");
         let arg = rest.join(" ");
@@ -173,6 +185,26 @@ impl Script {
             "paste" => Step::Paste,
             "amount" => Step::Amount(arg.parse().unwrap_or(100.0)),
             "exportdir" => Step::ExportDir(PathBuf::from(arg)),
+            "crop" => {
+                let num = |i: usize| rest.get(i).and_then(|s| s.parse::<f32>().ok());
+                let rect = match (num(0), num(1), num(2), num(3)) {
+                    (Some(left), Some(top), Some(right), Some(bottom)) => Some(pipeline::geometry::Rect { left, top, right, bottom }),
+                    _ => None,
+                };
+                let after = |key: &str| rest.iter().position(|w| *w == key).map(|i| i + 1);
+                let angle = after("angle").and_then(num);
+                let aspect = after("aspect").and_then(|i| rest.get(i)?.parse().ok()).map(|n| (n, rest.contains(&"portrait")));
+                Step::Crop { rect, angle, aspect }
+            }
+            "cropdone" => Step::CropDone(false),
+            "cropcancel" => Step::CropDone(true),
+            "compare" => Step::Compare(match arg.as_str() {
+                "split" => crate::viewer::Compare::Split,
+                "side" => crate::viewer::Compare::SideBySide,
+                _ => crate::viewer::Compare::Single,
+            }),
+            "pick" if rest.len() == 2 => Step::Pick(rest[0].parse().unwrap_or(0.5), rest[1].parse().unwrap_or(0.5)),
+            "auto" => Step::Auto,
             "next" => Step::Photo(1),
             "prev" => Step::Photo(-1),
             "shot" => {

@@ -3,6 +3,7 @@
 //! started yet is replaced by the next one: while a slider moves only the
 //! latest value is rendered.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,7 +13,7 @@ use eframe::egui;
 use pipeline::adobe::{self, AdobeProfiles};
 use pipeline::{Pipeline, RenderOptions, SourceKind};
 use raw::{ColorSource, DecodeOptions, Image, Photo, PhotoInfo, TempTint};
-use xmp::{DevelopSettings, Look};
+use xmp::{Basic, DevelopSettings, Look};
 
 use crate::state::Edit;
 
@@ -20,6 +21,17 @@ use crate::state::Edit;
 pub const PREVIEW_SIZE: usize = 2048;
 /// Long edge of the quick render shown while a slider is being dragged.
 pub const DRAFT_SIZE: usize = 1024;
+/// Long edge of the preset thumbnails.
+pub const THUMB_SIZE: usize = 160;
+/// Long edge of the copy the thumbnails are rendered from.
+const SMALL_SIZE: usize = 320;
+
+/// A preset thumbnail to render: the photo with `edit`.
+pub struct ThumbJob {
+    /// Identifies the thumbnail in the reply (the preset's path).
+    pub key: PathBuf,
+    pub edit: Edit,
+}
 
 #[derive(Clone, Debug)]
 pub struct RenderJob {
@@ -55,6 +67,15 @@ pub enum Event {
     /// The photo with default settings, for the before/after view.
     Before { generation: u64, image: egui::ColorImage },
     Rendered(Box<Rendered>),
+    /// White balance that makes the picked point neutral: absolute
+    /// temperature/tint for raw files, incremental values for rendered ones.
+    WhitePicked { generation: u64, temperature: f32, tint: f32, incremental: bool },
+    /// The picked point was clipped or black: no white balance from it.
+    PickFailed { generation: u64 },
+    /// Tone settings proposed by Auto.
+    AutoTone { generation: u64, basic: Basic },
+    /// A preset thumbnail.
+    PresetThumb { generation: u64, key: PathBuf, image: egui::ColorImage },
 }
 
 pub struct Rendered {
@@ -75,6 +96,8 @@ pub struct Rendered {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Quality {
+    /// Preset thumbnails.
+    Thumb,
     Draft,
     Preview,
     Full,
@@ -84,6 +107,13 @@ pub enum Quality {
 struct Mailbox {
     load: Option<(PathBuf, u64)>,
     render: Option<RenderJob>,
+    /// Eyedropper: generation and point in fractions of the oriented,
+    /// uncropped photo.
+    pick: Option<(u64, (f32, f32))>,
+    /// Auto tone for this edit.
+    auto: Option<(u64, Edit)>,
+    /// Preset thumbnails, done when nothing else is waiting.
+    thumbs: VecDeque<(u64, ThumbJob)>,
     quit: bool,
 }
 
@@ -119,8 +149,26 @@ impl Worker {
 
     /// Queues a render, replacing one that has not started yet.
     pub fn render(&self, job: RenderJob) {
+        self.post(|m| m.render = Some(job));
+    }
+
+    /// White balance from the point (u, v) of the oriented, uncropped photo.
+    pub fn pick_white(&self, generation: u64, point: (f32, f32)) {
+        self.post(|m| m.pick = Some((generation, point)));
+    }
+
+    pub fn auto_tone(&self, generation: u64, edit: Edit) {
+        self.post(|m| m.auto = Some((generation, edit)));
+    }
+
+    /// Replaces the queue of preset thumbnails.
+    pub fn preset_thumbs(&self, generation: u64, jobs: Vec<ThumbJob>) {
+        self.post(|m| m.thumbs = jobs.into_iter().map(|j| (generation, j)).collect());
+    }
+
+    fn post(&self, f: impl FnOnce(&mut Mailbox)) {
         let (lock, cv) = &*self.mailbox;
-        lock.lock().unwrap().render = Some(job);
+        f(&mut lock.lock().unwrap());
         cv.notify_one();
     }
 }
@@ -140,6 +188,9 @@ impl Drop for Worker {
 enum Task {
     Load(PathBuf, u64),
     Render(Box<RenderJob>),
+    Pick(u64, (f32, f32)),
+    Auto(u64, Box<Edit>),
+    Thumb(u64, Box<ThumbJob>),
 }
 
 struct WorkerState {
@@ -158,13 +209,17 @@ struct OpenPhoto {
     preview: Photo,
     /// Full-size decode, made on demand for 100% views.
     full: Option<Photo>,
+    /// A small copy for the preset thumbnails.
+    small: Photo,
     /// Long edge of the full-size photo, for pixel radii.
     full_size: usize,
     profiles: ProfileCache,
     /// Which cache entry `preview` / `full` currently carry.
     applied: Option<Option<Look>>,
     applied_full: Option<Option<Look>>,
-    before_done: bool,
+    applied_small: Option<Option<Look>>,
+    /// Crop of the last "before" render (it follows the edit's crop).
+    before_crop: Option<xmp::Crop>,
 }
 
 impl WorkerState {
@@ -180,15 +235,25 @@ impl WorkerState {
                     if let Some((p, g)) = m.load.take() {
                         break Task::Load(p, g);
                     }
+                    if let Some((g, p)) = m.pick.take() {
+                        break Task::Pick(g, p);
+                    }
                     if let Some(job) = m.render.take() {
                         break Task::Render(Box::new(job));
+                    }
+                    if let Some((g, e)) = m.auto.take() {
+                        break Task::Auto(g, Box::new(e));
+                    }
+                    // Lowest priority: one thumbnail, then look again.
+                    if let Some((g, job)) = m.thumbs.pop_front() {
+                        break Task::Thumb(g, Box::new(job));
                     }
                     m = cv.wait(m).unwrap();
                 }
             };
             let pending = || {
                 let m = mailbox.0.lock().unwrap();
-                m.load.is_some() || m.render.is_some() || m.quit
+                m.load.is_some() || m.render.is_some() || m.pick.is_some() || m.auto.is_some() || m.quit
             };
             match task {
                 Task::Load(path, generation) => self.load(path, generation),
@@ -199,10 +264,19 @@ impl WorkerState {
                     }
                     self.render(&job, Quality::Preview);
                     if !pending() {
-                        self.render_before(job.generation);
+                        self.render_before(&job);
                     }
                     if job.detail && !pending() {
                         self.render(&job, Quality::Full);
+                    }
+                }
+                Task::Pick(generation, point) => self.pick_white(generation, point),
+                Task::Auto(generation, edit) => self.auto_tone(generation, &edit),
+                Task::Thumb(generation, job) => {
+                    let render = RenderJob { id: 0, generation, edit: job.edit, draft: false, detail: false };
+                    if let Some(d) = self.develop(&render, Quality::Thumb) {
+                        let (image, _) = to_color_image(&d.img);
+                        self.send(Event::PresetThumb { generation, key: job.key, image });
                     }
                 }
             }
@@ -234,32 +308,86 @@ impl WorkerState {
         let info = photo.info.clone();
         let mut preview = photo;
         preview.data = preview.data.downscale(PREVIEW_SIZE);
+        let small = Photo { data: preview.data.downscale(SMALL_SIZE), info: preview.info.clone(), color: preview.color.clone() };
         let profiles = ProfileCache::new(&preview);
         self.photo = Some(OpenPhoto {
             generation,
             path: path.clone(),
             preview,
             full: None,
+            small,
             full_size: size[0].max(size[1]),
             profiles,
             applied: None,
             applied_full: None,
-            before_done: false,
+            applied_small: None,
+            before_crop: None,
         });
         self.send(Event::Loaded { generation, path, info: Box::new(info), kind, size, decode_ms });
     }
 
-    /// The default rendering for this kind of file, once per photo, after
-    /// the first render of the edit.
-    fn render_before(&mut self, generation: u64) {
-        let Some(open) = self.photo.as_mut().filter(|p| p.generation == generation && !p.before_done) else { return };
-        open.before_done = true;
-        let kind = SourceKind::of(&open.preview);
-        let before = RenderJob { id: 0, generation, edit: Edit::defaults(kind), draft: false, detail: false };
+    /// The default rendering for this kind of file, with the edit's crop so
+    /// before and after line up; redone when the crop changes.
+    fn render_before(&mut self, job: &RenderJob) {
+        let generation = job.generation;
+        let crop = &job.edit.settings.crop;
+        let Some(open) = self.photo.as_mut().filter(|p| p.generation == generation && p.before_crop.as_ref() != Some(crop)) else { return };
+        open.before_crop = Some(crop.clone());
+        let mut edit = Edit::defaults(SourceKind::of(&open.preview));
+        edit.settings.crop = crop.clone();
+        let before = RenderJob { id: 0, generation, edit, draft: false, detail: false };
         if let Some(d) = self.develop(&before, Quality::Preview) {
             let (image, _) = to_color_image(&d.img);
             self.send(Event::Before { generation, image });
         }
+    }
+
+    /// Eyedropper: the white balance under which the average around
+    /// (u, v) is neutral.
+    fn pick_white(&mut self, generation: u64, (u, v): (f32, f32)) {
+        let Some(open) = self.photo.as_ref().filter(|p| p.generation == generation) else { return };
+        let img = &open.preview.data;
+        let (cx, cy) = ((u * img.width as f32) as i64, (v * img.height as f32) as i64);
+        let r = (img.width.max(img.height) as i64 / 500).max(2);
+        let (mut sum, mut n, mut clipped) = ([0.0f64; 3], 0, false);
+        for y in (cy - r).max(0)..=(cy + r).min(img.height as i64 - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(img.width as i64 - 1) {
+                let p = img.get(x as usize, y as usize);
+                clipped |= p.iter().any(|c| *c >= 0.99);
+                (0..3).for_each(|c| sum[c] += p[c] as f64);
+                n += 1;
+            }
+        }
+        if n == 0 || clipped {
+            self.send(Event::PickFailed { generation });
+            return;
+        }
+        let mean = sum.map(|s| s / n as f64);
+        let event = match &open.preview.color {
+            ColorSource::Camera(cam) if mean.iter().all(|c| *c > 1e-5) => {
+                let tt = TempTint::from_xy(cam.profile.neutral_to_xy(raw::profile::normalize_max(mean)));
+                Event::WhitePicked { generation, temperature: tt.temperature as f32, tint: tt.tint as f32, incremental: false }
+            }
+            ColorSource::Working => match crate::auto::incremental_white(mean.map(|c| c as f32)) {
+                Some((temperature, tint)) => Event::WhitePicked { generation, temperature, tint, incremental: true },
+                None => Event::PickFailed { generation },
+            },
+            _ => Event::PickFailed { generation },
+        };
+        self.send(event);
+    }
+
+    /// Auto tone: develops a small copy with the tone sliders at zero and
+    /// reads its lightness.
+    fn auto_tone(&mut self, generation: u64, edit: &Edit) {
+        let mut edit = edit.clone();
+        edit.settings.basic = Basic::default();
+        edit.settings.effects.grain_amount = 0.0;
+        let job = RenderJob { id: 0, generation, edit, draft: true, detail: false };
+        let Some(d) = self.develop(&job, Quality::Draft) else { return };
+        let rgb = raw::encode_srgb8(&d.img, 0.0);
+        let basic = crate::auto::auto_tone(&crate::auto::luma8(&rgb));
+        self.send(Event::AutoTone { generation, basic });
     }
 
     fn render(&mut self, job: &RenderJob, quality: Quality) {
@@ -287,7 +415,13 @@ impl WorkerState {
         let notes = prepared.notes.clone();
         let (color, info) = (prepared.color.clone(), prepared.info.clone());
 
-        let photo = if quality == Quality::Full {
+        let photo = if quality == Quality::Thumb {
+            if open.applied_small.as_ref() != Some(&key) {
+                (open.small.color, open.small.info) = (color, info);
+                open.applied_small = Some(key);
+            }
+            &open.small
+        } else if quality == Quality::Full {
             if open.full.is_none() {
                 open.full = Photo::load(&open.path, &DecodeOptions::default()).ok();
                 open.applied_full = None;
@@ -310,7 +444,11 @@ impl WorkerState {
         if let Some(l) = &job.edit.lut {
             pipeline = pipeline.with_cube((*l.cube).clone(), job.edit.lut_amount / 100.0);
         }
-        let max_size = (quality == Quality::Draft).then_some(DRAFT_SIZE);
+        let max_size = match quality {
+            Quality::Draft => Some(DRAFT_SIZE),
+            Quality::Thumb => Some(THUMB_SIZE),
+            _ => None,
+        };
         let mut img = pipeline.render(photo, &RenderOptions { max_size, full_size: Some(open.full_size) });
         pipeline.grain(&mut img);
 

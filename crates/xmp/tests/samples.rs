@@ -122,3 +122,21 @@ fn decodes_rgb_table_embedded_in_a_look() {
     assert_eq!(look.amount, 0.8);
     assert_eq!(look.rgb_table, Some(table));
 }
+
+#[test]
+fn crop_keys_round_trip() {
+    let xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+        crs:HasCrop="True" crs:CropTop="0.1" crs:CropLeft="0.05" crs:CropBottom="0.9" crs:CropRight="0.8" crs:CropAngle="-2.5"/>
+    </rdf:RDF></x:xmpmeta>"#;
+    let s = DevelopSettings::from_props(&XmpPacket::parse(xml).unwrap().props).unwrap();
+    assert!(s.crop.has_crop && s.crop.is_active());
+    assert_eq!((s.crop.top, s.crop.left, s.crop.bottom, s.crop.right, s.crop.angle), (0.1, 0.05, 0.9, 0.8, -2.5));
+    assert!(DevelopSettings::is_known_key("HasCrop") && DevelopSettings::is_known_key("CropAngle"));
+
+    let mut packet = XmpPacket::default();
+    s.write_into(&mut packet.props);
+    let back = DevelopSettings::from_props(&XmpPacket::parse(&packet.to_xml()).unwrap().props).unwrap();
+    assert_eq!(back.crop, s.crop);
+    assert!(!DevelopSettings::default().crop.is_active());
+}

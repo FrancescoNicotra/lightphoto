@@ -20,6 +20,8 @@ pub struct PanelInput<'a> {
     pub histogram: Option<&'a Histogram>,
     /// The camera's white balance, for the preset amount.
     pub as_shot: Option<(f32, f32)>,
+    /// The white balance eyedropper is active.
+    pub picking: bool,
 }
 
 /// Panel choices that are not part of the edit.
@@ -35,6 +37,9 @@ pub struct PanelState {
 pub enum PanelAction {
     LoadLut,
     ResetAll,
+    /// Toggle the white balance eyedropper.
+    PickWhite,
+    AutoTone,
 }
 
 /// HSL bands: English and Italian name, centre hue.
@@ -94,7 +99,7 @@ pub fn develop_panels(ui: &mut Ui, edit: &mut Edit, input: &PanelInput, st: &mut
     let force = st.force_open.take();
     let f = force.as_deref();
     section(ui, "profile", tr("Profile & LUT", "Profilo e LUT"), true, f, |ui| profile(ui, edit, &mut actions));
-    section(ui, "basic", tr("Basic", "Base"), true, f, |ui| basic(ui, edit, input));
+    section(ui, "basic", tr("Basic", "Base"), true, f, |ui| basic(ui, edit, input, &mut actions));
     section(ui, "curve", tr("Tone curve", "Curva di viraggio"), false, f, |ui| curve(ui, edit, input, &mut st.curve_tab));
     section(ui, "hsl", tr("HSL / Color", "HSL / Colore"), false, f, |ui| hsl(ui, edit, &mut st.hsl_tab));
     section(ui, "grading", "Color grading", false, f, |ui| grading(ui, edit, &mut st.grading_tab));
@@ -185,7 +190,25 @@ fn profile(ui: &mut Ui, edit: &mut Edit, actions: &mut Vec<PanelAction>) {
 const TEMP_COLORS: [Color32; 2] = [Color32::from_rgb(60, 110, 220), Color32::from_rgb(225, 200, 70)];
 const TINT_COLORS: [Color32; 2] = [Color32::from_rgb(70, 180, 70), Color32::from_rgb(210, 70, 200)];
 
-fn basic(ui: &mut Ui, edit: &mut Edit, input: &PanelInput) {
+fn basic(ui: &mut Ui, edit: &mut Edit, input: &PanelInput, actions: &mut Vec<PanelAction>) {
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(input.picking, tr("WB picker", "Contagocce"))
+            .on_hover_text(tr("Click a neutral grey or white point of the photo (W)", "Clic su un punto grigio o bianco neutro della foto (W)"))
+            .clicked()
+        {
+            actions.push(PanelAction::PickWhite);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button(tr("Auto", "Auto"))
+                .on_hover_text(tr("Set exposure, contrast, highlights, shadows, whites and blacks from the histogram", "Imposta esposizione, contrasto, luci, ombre, bianchi e neri dall'istogramma"))
+                .clicked()
+            {
+                actions.push(PanelAction::AutoTone);
+            }
+        });
+    });
     let s = &mut edit.settings;
     if input.kind == SourceKind::Raw {
         let names: [(&str, WhiteBalance); 9] = [

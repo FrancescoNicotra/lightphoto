@@ -14,6 +14,7 @@ use pipeline::SourceKind;
 use raw::PhotoInfo;
 
 use crate::i18n::{tr, trf};
+use crate::crop_tool::{CropTool, ASPECTS};
 use crate::export_ui::{self, DialogResult, ExportEvent, ExportJob, ExportSettings};
 use crate::library::{self, PresetEntry, PresetKind};
 use crate::panels::{self, PanelAction, PanelInput, PanelState};
@@ -21,7 +22,8 @@ use crate::script::{Script, Selection, Step};
 use crate::state::{self, Edit, History, LutRef};
 use crate::theme;
 use crate::viewer::{self, ViewInput, Viewer};
-use crate::worker::{Event, Histogram, Quality, RenderJob, Worker, PREVIEW_SIZE};
+use crate::worker::{Event, Histogram, Quality, RenderJob, ThumbJob, Worker, PREVIEW_SIZE};
+use crate::widgets::Slider;
 use crate::Args;
 
 const KEY_PHOTO_FOLDER: &str = "photo_folder";
@@ -116,6 +118,14 @@ pub struct LumenApp {
 
     viewer: Viewer,
     panel_state: PanelState,
+    /// Crop & straighten tool, while open.
+    crop_tool: Option<CropTool>,
+    /// White balance eyedropper active.
+    picking: bool,
+    /// Preset thumbnails: (photo, preset) → texture.
+    preset_thumbs: HashMap<(PathBuf, PathBuf), TextureHandle>,
+    /// Photo and preset count the thumbnails were last asked for.
+    thumbs_asked: Option<(PathBuf, usize)>,
 
     export: ExportSettings,
     export_open: bool,
@@ -180,6 +190,10 @@ impl LumenApp {
             hover_cache: None,
             viewer: Viewer::default(),
             panel_state: PanelState::default(),
+            crop_tool: None,
+            picking: false,
+            preset_thumbs: HashMap::new(),
+            thumbs_asked: None,
             export: get(KEY_EXPORT).map(|s| ExportSettings::from_storage(&s)).unwrap_or_default(),
             export_open: false,
             export_tx,
@@ -223,6 +237,7 @@ impl LumenApp {
         self.thumbs_pending = self.photos.len();
         self.selection.clear();
         self.anchor = None;
+        self.preset_thumbs.clear();
         let generation = self.thumb_generation.fetch_add(1, Ordering::Relaxed) + 1;
         library::spawn_thumbnails(self.photos.clone(), generation, self.thumb_generation.clone(), self.thumb_tx.clone(), ctx.clone());
         self.folder = Some(dir);
@@ -448,6 +463,8 @@ impl LumenApp {
         self.notes.clear();
         self.last_sent = None;
         self.hover_cache = None;
+        self.crop_tool = None;
+        self.picking = false;
         self.viewer.reset();
     }
 
@@ -471,6 +488,8 @@ impl LumenApp {
         self.preset_rx = Some(rx);
         self.preset_folder = Some(dir);
         self.hover_cache = None;
+        self.preset_thumbs.clear();
+        self.thumbs_asked = None;
     }
 
     // ------------------------------------------------------------------
@@ -577,6 +596,32 @@ impl LumenApp {
                 Event::Before { generation, image } if generation == c.generation => {
                     set_texture(ctx, &mut self.before, "before", image, tex_opts);
                 }
+                Event::WhitePicked { generation, temperature, tint, incremental } if generation == c.generation => {
+                    let s = &mut c.edit.settings;
+                    if incremental {
+                        (s.incremental_temperature, s.incremental_tint) = (temperature, tint);
+                    } else {
+                        s.white_balance = xmp::WhiteBalance::Custom;
+                        s.temperature = Some(temperature.clamp(2000.0, 50000.0).round());
+                        s.tint = Some(tint.clamp(-150.0, 150.0).round());
+                    }
+                    c.history.checkpoint(&c.edit);
+                }
+                Event::PickFailed { generation } if generation == c.generation => {
+                    self.message = Some((
+                        tr("That point is clipped or black: pick a grey or white point with detail", "Il punto è bruciato o nero: scegli un punto grigio o bianco con dettaglio").into(),
+                        Instant::now(),
+                        true,
+                    ));
+                }
+                Event::AutoTone { generation, basic } if generation == c.generation => {
+                    c.edit.settings.basic = basic;
+                    c.history.checkpoint(&c.edit);
+                }
+                Event::PresetThumb { generation, key, image } if generation == c.generation => {
+                    let tex = ctx.load_texture(format!("preset-{}", key.display()), image, tex_opts);
+                    self.preset_thumbs.insert((c.path.clone(), key), tex);
+                }
                 Event::Rendered(r) if r.generation == c.generation => {
                     if self.script.is_some() {
                         eprintln!("render {:?} {} × {}: {} ms", r.quality, r.image.size[0], r.image.size[1], r.ms);
@@ -659,7 +704,17 @@ impl LumenApp {
             }
             self.hover_cache.as_ref().map(|(_, _, e)| e)
         });
-        let target = hover.unwrap_or(&c.edit);
+        let cropping;
+        let target = match &self.crop_tool {
+            // While cropping: the straightened, uncropped photo.
+            Some(tool) => {
+                let mut e = c.edit.clone();
+                e.settings.crop = tool.preview();
+                cropping = e;
+                &cropping
+            }
+            None => hover.unwrap_or(&c.edit),
+        };
         let detail = self.wants_detail && !self.viewer.show_before;
         let draft = (pointer_down && ctx.dragged_id().is_some()) || self.script.as_ref().is_some_and(Script::dragging);
         if let Some((e, d, was_draft)) = &self.last_sent {
@@ -703,6 +758,15 @@ impl LumenApp {
         if pressed(shortcut(cmd, Key::A)) {
             self.select_all();
         }
+        if pressed(shortcut(Modifiers::NONE, Key::R)) {
+            self.toggle_crop_tool(false);
+        }
+        if pressed(shortcut(Modifiers::NONE, Key::W)) && self.crop_tool.is_none() {
+            self.picking = !self.picking;
+        }
+        if self.crop_tool.is_some() && pressed(shortcut(Modifiers::NONE, Key::Enter)) {
+            self.toggle_crop_tool(false);
+        }
         if pressed(shortcut(cmd | Modifiers::SHIFT, Key::Z)) || pressed(shortcut(cmd, Key::Y)) {
             self.redo();
         } else if pressed(shortcut(cmd, Key::Z)) {
@@ -721,6 +785,10 @@ impl LumenApp {
             self.step_photo(-1);
         }
         if pressed(shortcut(Modifiers::NONE, Key::Escape)) {
+            if self.crop_tool.is_some() {
+                self.toggle_crop_tool(true);
+            }
+            self.picking = false;
             self.export_open = false;
         }
     }
@@ -860,6 +928,32 @@ impl LumenApp {
                     ui.close();
                     self.viewer.show_before = !self.viewer.show_before;
                 }
+                ui.separator();
+                for (mode, en, it) in [
+                    (viewer::Compare::Single, "Single view", "Vista singola"),
+                    (viewer::Compare::Split, "Before / After split", "Prima / Dopo a tendina"),
+                    (viewer::Compare::SideBySide, "Before / After side by side", "Prima / Dopo affiancate"),
+                ] {
+                    if ui.radio(self.viewer.compare == mode, tr(en, it)).clicked() {
+                        ui.close();
+                        self.viewer.compare = mode;
+                    }
+                }
+            });
+            ui.menu_button(tr("Tools", "Strumenti"), |ui| {
+                let loaded = self.current.as_ref().is_some_and(|c| c.loaded);
+                if ui.add_enabled(loaded, egui::Button::new(tr("Crop & straighten", "Ritaglia e raddrizza")).shortcut_text("R")).clicked() {
+                    ui.close();
+                    self.toggle_crop_tool(false);
+                }
+                if ui.add_enabled(loaded, egui::Button::new(tr("White balance picker", "Contagocce bilanciamento")).shortcut_text("W")).clicked() {
+                    ui.close();
+                    self.picking = true;
+                }
+                if ui.add_enabled(loaded, egui::Button::new(tr("Auto tone", "Tono automatico"))).clicked() {
+                    ui.close();
+                    self.auto_tone();
+                }
             });
         });
     }
@@ -898,6 +992,7 @@ impl LumenApp {
         let filter = self.preset_filter.to_lowercase();
         let enabled = self.current.as_ref().is_some_and(|c| c.loaded);
         let applied = self.current.as_ref().map(|c| (c.edit.preset_name.clone(), c.edit.lut.as_ref().map(|l| l.path.clone())));
+        let photo = self.current.as_ref().map(|c| c.path.clone());
         let mut clicked = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let mut i = 0;
@@ -921,8 +1016,8 @@ impl LumenApp {
                             _ => name.as_ref() == Some(&p.name),
                         });
                         let broken = matches!(p.kind, PresetKind::Broken(_));
-                        let text = RichText::new(format!("{icon}  {}", p.name)).color(if broken { theme::TEXT_DIM } else { theme::TEXT });
-                        let r = ui.add_enabled(enabled && !broken, egui::Button::selectable(selected, text));
+                        let thumb = photo.as_ref().and_then(|ph| self.preset_thumbs.get(&(ph.clone(), p.path.clone())));
+                        let r = preset_row(ui, &p.name, icon, thumb, selected, enabled && !broken);
                         let r = r.on_hover_text(format!("{tip}\n{}", p.path.display()));
                         if r.hovered() {
                             self.hover_preset = Some(i + j);
@@ -946,14 +1041,20 @@ impl LumenApp {
             ui.label(RichText::new(shooting_info(info)).color(theme::TEXT_DIM).size(11.5));
         }
         ui.separator();
-        let Some(c) = &mut self.current else {
+        let Some(kind) = self.current.as_ref().map(|c| c.kind) else {
             ui.label(RichText::new(tr("No photo open", "Nessuna foto aperta")).color(theme::TEXT_DIM));
             return;
         };
-        let input = PanelInput { kind: c.kind, white_balance: self.white_balance, histogram: self.histogram.as_ref(), as_shot: self.as_shot };
+        let histogram = self.histogram;
+        let input = PanelInput { kind, white_balance: self.white_balance, histogram: histogram.as_ref(), as_shot: self.as_shot, picking: self.picking };
         let mut actions = Vec::new();
+        let tool_open = self.crop_tool.is_some();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.add_enabled_ui(c.loaded, |ui| {
+            if tool_open {
+                self.crop_controls(ui);
+            }
+            let Some(c) = &mut self.current else { return };
+            ui.add_enabled_ui(c.loaded && !tool_open, |ui| {
                 actions = panels::develop_panels(ui, &mut c.edit, &input, &mut self.panel_state);
             });
         });
@@ -961,6 +1062,8 @@ impl LumenApp {
             match a {
                 PanelAction::LoadLut => self.load_lut_dialog(),
                 PanelAction::ResetAll => self.reset_edit(),
+                PanelAction::PickWhite => self.picking = !self.picking,
+                PanelAction::AutoTone => self.auto_tone(),
             }
         }
     }
@@ -1048,7 +1151,7 @@ impl LumenApp {
                 if c.loaded {
                     ui.label(RichText::new(format!("{} × {}", c.full_size[0], c.full_size[1])).color(theme::TEXT_DIM));
                     let q = match self.render_quality {
-                        Quality::Draft => tr("draft", "bozza"),
+                        Quality::Thumb | Quality::Draft => tr("draft", "bozza"),
                         Quality::Preview => tr("preview", "anteprima"),
                         Quality::Full => tr("full resolution", "piena risoluzione"),
                     };
@@ -1078,10 +1181,24 @@ impl LumenApp {
     }
 
     fn central(&mut self, ui: &mut Ui) {
+        let mut toggle_crop = false;
         egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            self.viewer.toolbar(ui, self.current.is_some());
+            // Wraps to a second line when the view is narrow.
+            ui.horizontal_wrapped(|ui| {
+                self.viewer.toolbar(ui, self.current.is_some());
+                ui.separator();
+                ui.add_enabled_ui(self.current.as_ref().is_some_and(|c| c.loaded), |ui| {
+                    let r = ui.selectable_label(self.crop_tool.is_some(), tr("Crop  R", "Ritaglia  R"));
+                    toggle_crop = r.on_hover_text(tr("Crop and straighten (R)", "Ritaglia e raddrizza (R)")).clicked();
+                    ui.toggle_value(&mut self.picking, tr("WB picker  W", "Contagocce  W"))
+                        .on_hover_text(tr("Click a neutral point to set the white balance (W)", "Clic su un punto neutro per il bilanciamento del bianco (W)"));
+                });
+            });
         });
+        if toggle_crop {
+            self.toggle_crop_tool(false);
+        }
         let message = match &self.current {
             None => Some(viewer::empty_message()),
             Some(c) if c.error.is_some() => Some(trf!("Cannot open {}: {}", "Impossibile aprire {}: {}", file_name(&c.path), c.error.as_deref().unwrap_or(""))),
@@ -1089,19 +1206,135 @@ impl LumenApp {
             _ => None,
         };
         let after = self.after.as_ref();
-        let texture = if self.viewer.show_before {
-            self.before.as_ref().or(after.map(|s| &s.tex))
-        } else {
-            match (&self.detail, after) {
-                (Some(d), Some(a)) if self.wants_detail && d.id == a.id => Some(&d.tex),
-                _ => after.map(|s| &s.tex),
-            }
+        let texture = match (&self.detail, after) {
+            (Some(d), Some(a)) if self.wants_detail && d.id == a.id => Some(&d.tex),
+            _ => after.map(|s| &s.tex),
         };
-        let full_size = self.current.as_ref().map_or([1, 1], |c| c.full_size);
-        let long = full_size[0].max(full_size[1]).max(1);
-        let preview_width = full_size[0] * PREVIEW_SIZE.min(long) / long;
-        let out = self.viewer.show(ui, &ViewInput { texture, full_size, preview_width, message });
+        let full_size = self.shown_size();
+        let preview_width = self.current.as_ref().map_or(1, |c| {
+            let long = c.full_size[0].max(c.full_size[1]).max(1);
+            full_size[0] * PREVIEW_SIZE.min(long) / long
+        });
+        let input = ViewInput { after: texture, before: self.before.as_ref(), full_size, preview_width, message, picking: self.picking };
+        let out = self.viewer.show(ui, &input, self.crop_tool.as_mut());
         self.wants_detail = out.wants_detail;
+        if let Some(p) = out.picked {
+            self.pick_white_at(p);
+        }
+    }
+
+    /// Size of the photo as shown: cropped, or whole while cropping.
+    fn shown_size(&self) -> [usize; 2] {
+        let Some(c) = &self.current else { return [1, 1] };
+        if self.crop_tool.is_some() {
+            return c.full_size;
+        }
+        let o = c.info.as_ref().map(|i| i.orientation).unwrap_or_default();
+        let (w, h) = pipeline::geometry::cropped_size(c.full_size[0], c.full_size[1], &c.edit.settings.crop, o);
+        [w, h]
+    }
+
+    /// The eyedropper clicked (u, v) of the shown photo: find that point in
+    /// the uncropped photo and ask the worker for the white balance.
+    fn pick_white_at(&mut self, (u, v): (f32, f32)) {
+        let Some(c) = &self.current else { return };
+        let o = c.info.as_ref().map(|i| i.orientation).unwrap_or_default();
+        let (rect, angle) = pipeline::geometry::to_oriented(&c.edit.settings.crop, o);
+        let [w, h] = c.full_size.map(|v| v as f32);
+        let (x, y) = ((rect.left + u * rect.width()) * w, (rect.top + v * rect.height()) * h);
+        let (sx, sy) = pipeline::geometry::source_of(x, y, w, h, angle);
+        self.worker.pick_white(c.generation, ((sx / w).clamp(0.0, 1.0), (sy / h).clamp(0.0, 1.0)));
+        self.picking = false;
+    }
+
+    fn auto_tone(&mut self) {
+        if let Some(c) = &self.current {
+            self.worker.auto_tone(c.generation, c.edit.clone());
+        }
+    }
+
+    /// Opens the crop tool, or closes it keeping the crop (or, with
+    /// `cancel`, the crop it started from).
+    fn toggle_crop_tool(&mut self, cancel: bool) {
+        let Some(c) = &mut self.current else { return };
+        match self.crop_tool.take() {
+            Some(tool) => {
+                c.edit.settings.crop = if cancel { tool.original.clone() } else { tool.result() };
+                c.history.checkpoint(&c.edit);
+            }
+            None if c.loaded && !cancel => {
+                let o = c.info.as_ref().map(|i| i.orientation).unwrap_or_default();
+                self.crop_tool = Some(CropTool::new(&c.edit.settings.crop, o, c.full_size));
+                self.picking = false;
+                self.viewer.compare = viewer::Compare::Single;
+                self.viewer.show_before = false;
+            }
+            None => {}
+        }
+    }
+
+    /// Aspect, orientation and angle of the crop tool, above the panels.
+    fn crop_controls(&mut self, ui: &mut Ui) {
+        let Some(tool) = &mut self.crop_tool else { return };
+        let mut done = None;
+        egui::Frame::new().fill(theme::PANEL_DARK).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+            ui.label(RichText::new(tr("Crop & straighten", "Ritaglio e raddrizzamento")).strong());
+            let (mut aspect, mut portrait) = (tool.aspect, tool.portrait);
+            ui.horizontal(|ui| {
+                ui.label(tr("Aspect", "Proporzioni"));
+                egui::ComboBox::from_id_salt("aspect").selected_text(tr(ASPECTS[aspect].0, ASPECTS[aspect].1)).show_ui(ui, |ui| {
+                    for (i, (en, it, _)) in ASPECTS.iter().enumerate() {
+                        ui.selectable_value(&mut aspect, i, tr(en, it));
+                    }
+                });
+                ui.selectable_value(&mut portrait, false, tr("Landscape", "Orizzontale"));
+                ui.selectable_value(&mut portrait, true, tr("Portrait", "Verticale"));
+            });
+            if (aspect, portrait) != (tool.aspect, tool.portrait) {
+                tool.set_aspect(aspect, portrait);
+            }
+            let mut angle = tool.angle;
+            if Slider::new(tr("Angle", "Angolo"), -45.0..=45.0, 0.0).decimals(1).suffix("°").show(ui, &mut angle).changed() {
+                tool.set_angle(angle);
+            }
+            ui.label(RichText::new(tr("Drag outside the frame to rotate", "Trascina fuori dal riquadro per ruotare")).color(theme::TEXT_DIM).size(11.0));
+            ui.horizontal(|ui| {
+                if ui.button(tr("Reset", "Reimposta")).clicked() {
+                    tool.reset();
+                }
+                if ui.button(RichText::new(tr("Done  ↵", "Fatto  ↵")).strong()).clicked() {
+                    done = Some(false);
+                }
+                if ui.button(tr("Cancel  Esc", "Annulla  Esc")).clicked() {
+                    done = Some(true);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if let Some(cancel) = done {
+            self.toggle_crop_tool(cancel);
+        }
+    }
+
+    /// Asks the worker for the thumbnails of the presets on the open photo
+    /// (each preset on the photo's default settings), once per photo.
+    fn request_preset_thumbs(&mut self) {
+        let Some(c) = self.current.as_ref().filter(|c| c.loaded) else { return };
+        if self.preset_rx.is_some() || self.thumbs_asked.as_ref().is_some_and(|(p, n)| *p == c.path && *n == self.presets.len()) {
+            return;
+        }
+        let jobs: Vec<ThumbJob> = self
+            .presets
+            .iter()
+            .filter(|p| !self.preset_thumbs.contains_key(&(c.path.clone(), p.path.clone())))
+            .filter_map(|p| {
+                let mut edit = Edit::defaults(c.kind);
+                apply_entry(&mut edit, p).ok()?;
+                Some(ThumbJob { key: p.path.clone(), edit })
+            })
+            .collect();
+        self.worker.preset_thumbs(c.generation, jobs);
+        self.thumbs_asked = Some((c.path.clone(), self.presets.len()));
     }
 
     fn export_dialog(&mut self, ctx: &egui::Context) {
@@ -1112,7 +1345,8 @@ impl LumenApp {
             self.export_open = false;
             return;
         };
-        let (path, full, preset) = (c.path.clone(), c.full_size, c.edit.preset_name.clone());
+        let (path, preset) = (c.path.clone(), c.edit.preset_name.clone());
+        let full = self.shown_size();
         let count = self.targets().len();
         let modal = egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
             ui.set_width(460.0);
@@ -1141,6 +1375,7 @@ impl LumenApp {
             && self.thumbs_pending == 0
             && self.exporting == 0
             && self.current.as_ref().is_some_and(|c| c.edit == c.saved)
+            && self.presets.iter().filter(|p| !matches!(p.kind, PresetKind::Broken(_))).all(|p| self.preset_thumbs.contains_key(&(c.path.clone(), p.path.clone())))
     }
 
     fn run_script(&mut self, ctx: &egui::Context) {
@@ -1202,6 +1437,31 @@ impl LumenApp {
                 }
             }
             Step::ExportDir(dir) => self.export.folder = Some(dir),
+            Step::Crop { rect, angle, aspect } => {
+                if self.crop_tool.is_none() {
+                    self.toggle_crop_tool(false);
+                }
+                if let Some(tool) = &mut self.crop_tool {
+                    if let Some((i, portrait)) = aspect {
+                        tool.set_aspect(i, portrait);
+                    }
+                    if let Some(a) = angle {
+                        tool.set_angle(a);
+                    }
+                    if let Some(r) = rect {
+                        tool.rect = r;
+                        tool.set_angle(tool.angle);
+                    }
+                }
+            }
+            Step::CropDone(cancel) => {
+                if self.crop_tool.is_some() {
+                    self.toggle_crop_tool(cancel);
+                }
+            }
+            Step::Compare(mode) => self.viewer.compare = mode,
+            Step::Pick(u, v) => self.pick_white_at((u, v)),
+            Step::Auto => self.auto_tone(),
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -1267,6 +1527,7 @@ impl eframe::App for LumenApp {
         }
         self.run_script(&ctx);
         self.request_render(&ctx);
+        self.request_preset_thumbs();
         self.update_title(&ctx);
         if self.message.as_ref().is_some_and(|(_, at, _)| at.elapsed() < Duration::from_secs(9)) {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -1295,6 +1556,37 @@ fn write_sidecar(path: &Path, edit: &Edit, kind: SourceKind) -> Result<(), Strin
         state::save_sidecar(path, edit)?;
     }
     Ok(())
+}
+
+/// A row of the preset list: the open photo with the preset (once its
+/// thumbnail is ready), the icon and the name.
+fn preset_row(ui: &mut Ui, name: &str, icon: &str, thumb: Option<&TextureHandle>, selected: bool, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 50.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let painter = ui.painter_at(rect);
+    if selected {
+        painter.rect_filled(rect, 3.0, ui.visuals().selection.bg_fill);
+    } else if resp.hovered() && enabled {
+        painter.rect_filled(rect, 3.0, Color32::from_gray(58));
+    }
+    let pic = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(63.0, 42.0));
+    match thumb {
+        Some(t) => {
+            let [w, h] = t.size().map(|v| v as f32);
+            let s = (pic.width() / w).min(pic.height() / h);
+            let r = egui::Rect::from_center_size(pic.center(), egui::vec2(w * s, h * s));
+            painter.image(t.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            painter.rect_filled(pic, 2.0, theme::PANEL_DARK);
+        }
+    }
+    let color = if enabled { theme::TEXT } else { theme::TEXT_DIM };
+    let mut job = egui::text::LayoutJob::simple_singleline(format!("{icon}  {name}"), egui::FontId::proportional(13.0), color);
+    job.wrap = egui::text::TextWrapping { max_width: rect.right() - pic.right() - 12.0, max_rows: 2, break_anywhere: false, overflow_character: Some('…') };
+    let galley = painter.layout_job(job);
+    let pos = egui::pos2(pic.right() + 8.0, rect.center().y - galley.size().y / 2.0);
+    painter.galley(pos, galley, color);
+    resp
 }
 
 /// A small label with a coloured background at `pos` (top left).

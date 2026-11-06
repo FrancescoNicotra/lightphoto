@@ -313,9 +313,10 @@ pub fn run_export(photo: &Path, edit: &Edit, s: &ExportSettings, adobe: &AdobePr
     if let Some(l) = &edit.lut {
         pipeline = pipeline.with_cube((*l.cube).clone(), edit.lut_amount / 100.0);
     }
-    let out = s.output_path(photo, [img.data.width, img.data.height], edit.preset_name.as_deref());
     let opts = ExportOptions { size: s.size(), format: s.format(), sharpen: s.sharpen };
     let rendered = pipeline.render(&img, &RenderOptions::default());
+    // Named after the developed (cropped) size.
+    let out = s.output_path(photo, [rendered.width, rendered.height], edit.preset_name.as_deref());
     let finished = export::finish(&rendered, &pipeline, &opts);
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
