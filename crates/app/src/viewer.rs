@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, TextureHandle, Ui, Vec2};
 
+use crate::i18n::tr;
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,7 +51,7 @@ impl Viewer {
     pub fn toolbar(&mut self, ui: &mut Ui, has_photo: bool) {
         ui.horizontal(|ui| {
             ui.add_enabled_ui(has_photo, |ui| {
-                if ui.selectable_label(self.zoom == Zoom::Fit, "Adatta").clicked() {
+                if ui.selectable_label(self.zoom == Zoom::Fit, tr("Fit", "Adatta")).clicked() {
                     self.zoom = Zoom::Fit;
                 }
                 for (label, r) in [("100%", 1.0), ("200%", 2.0)] {
@@ -59,7 +60,7 @@ impl Viewer {
                     }
                 }
                 ui.separator();
-                ui.toggle_value(&mut self.show_before, "Prima / Dopo  \\").on_hover_text("Mostra la foto senza modifiche (tasto \\)");
+                ui.toggle_value(&mut self.show_before, tr("Before / After  \\", "Prima / Dopo  \\")).on_hover_text(tr("Show the photo without edits (\\ key)", "Mostra la foto senza modifiche (tasto \\)"));
             });
         });
     }
@@ -138,7 +139,7 @@ impl Viewer {
         out.wants_detail = size.x * ppp > input.preview_width as f32 * 1.05;
 
         let pct = format!("{:.0}%", scale * ppp * 100.0);
-        let badge = if self.show_before { format!("Prima · {pct}") } else { pct };
+        let badge = if self.show_before { format!("{} · {pct}", tr("Before", "Prima")) } else { pct };
         let pos = rect.left_top() + vec2(10.0, 10.0);
         let galley = painter.layout_no_wrap(badge, egui::FontId::proportional(12.0), theme::TEXT);
         painter.rect_filled(Rect::from_min_size(pos - vec2(6.0, 3.0), galley.size() + vec2(12.0, 6.0)), 3.0, Color32::from_black_alpha(150));
@@ -153,5 +154,5 @@ impl Viewer {
 
 /// Text for an empty view.
 pub fn empty_message() -> String {
-    "Apri una cartella di foto (Ctrl+O) o trascina qui un file".into()
+    tr("Open a folder of photos (⌘O / Ctrl+O) or drop a file here", "Apri una cartella di foto (⌘O / Ctrl+O) o trascina qui un file").into()
 }

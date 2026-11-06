@@ -1,7 +1,7 @@
 //! The application: layout (menu, presets, image, develop panels,
 //! filmstrip), events from the background threads, shortcuts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -9,15 +9,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, TextureHandle, TextureOptions, Ui};
-use export::ExportOptions;
 use pipeline::adobe::AdobeProfiles;
 use pipeline::SourceKind;
 use raw::PhotoInfo;
 
-use crate::export_ui::{self, DialogResult, ExportEvent, ExportSettings};
+use crate::i18n::{tr, trf};
+use crate::export_ui::{self, DialogResult, ExportEvent, ExportJob, ExportSettings};
 use crate::library::{self, PresetEntry, PresetKind};
 use crate::panels::{self, PanelAction, PanelInput, PanelState};
-use crate::script::{Script, Step};
+use crate::script::{Script, Selection, Step};
 use crate::state::{self, Edit, History, LutRef};
 use crate::theme;
 use crate::viewer::{self, ViewInput, Viewer};
@@ -40,6 +40,23 @@ struct Current {
     decode_ms: u128,
     edit: Edit,
     history: History,
+    /// The edit as last written to (or read from) the sidecar.
+    saved: Edit,
+    /// The edit at the last change, and when that was (for autosave).
+    seen: Edit,
+    changed_at: Instant,
+}
+
+/// Wait after the last change before saving the sidecar.
+const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// What the filmstrip knows about a photo besides its thumbnail.
+#[derive(Clone, Default)]
+struct PhotoMeta {
+    /// Program that wrote a JPEG/PNG/TIFF (an edit or export already).
+    creator: Option<String>,
+    /// Its sidecar on disk holds an edit.
+    saved_edit: bool,
 }
 
 /// A texture and the render request it shows.
@@ -56,12 +73,20 @@ pub struct LumenApp {
     photos: Vec<PathBuf>,
     thumbs: Vec<Option<TextureHandle>>,
     thumb_generation: Arc<AtomicU64>,
-    thumb_tx: Sender<(u64, usize, Option<egui::ColorImage>)>,
-    thumb_rx: Receiver<(u64, usize, Option<egui::ColorImage>)>,
+    thumb_tx: Sender<library::Thumb>,
+    thumb_rx: Receiver<library::Thumb>,
+    meta: Vec<PhotoMeta>,
     /// Thumbnails not loaded (or failed) yet.
     thumbs_pending: usize,
+    /// The open photo's index.
     selected: Option<usize>,
+    /// Photos selected in the filmstrip (always includes the open one).
+    selection: BTreeSet<usize>,
+    /// Start of a ⇧-click range.
+    anchor: Option<usize>,
     scroll_to_selected: bool,
+    /// Copied settings (⌘⇧C).
+    clipboard: Option<Edit>,
 
     current: Option<Current>,
     /// Edits of the other photos opened in this session.
@@ -78,6 +103,7 @@ pub struct LumenApp {
     render_ms: u128,
     render_quality: Quality,
     white_balance: Option<(f32, f32)>,
+    as_shot: Option<(f32, f32)>,
     notes: Vec<String>,
     wants_detail: bool,
 
@@ -95,7 +121,10 @@ pub struct LumenApp {
     export_open: bool,
     export_tx: Sender<ExportEvent>,
     export_rx: Receiver<ExportEvent>,
+    /// Export batches running.
     exporting: usize,
+    /// Photo being exported and batch size.
+    export_progress: Option<(usize, usize)>,
 
     message: Option<(String, Instant, bool)>,
     title: String,
@@ -122,8 +151,12 @@ impl LumenApp {
             thumb_tx,
             thumb_rx,
             thumbs_pending: 0,
+            meta: Vec::new(),
             selected: None,
+            selection: BTreeSet::new(),
+            anchor: None,
             scroll_to_selected: false,
+            clipboard: None,
             current: None,
             edits: HashMap::new(),
             generation: 0,
@@ -136,6 +169,7 @@ impl LumenApp {
             render_ms: 0,
             render_quality: Quality::Preview,
             white_balance: None,
+            as_shot: None,
             notes: Vec::new(),
             wants_detail: false,
             preset_folder: None,
@@ -151,6 +185,7 @@ impl LumenApp {
             export_tx,
             export_rx,
             exporting: 0,
+            export_progress: None,
             message: None,
             title: String::new(),
             script: Script::from_env(),
@@ -162,11 +197,11 @@ impl LumenApp {
         match args.open.or_else(|| get(KEY_PHOTO_FOLDER).map(PathBuf::from).filter(|p| p.is_dir())) {
             Some(p) if p.is_dir() => app.open_folder(p, None, &cc.egui_ctx),
             Some(p) if p.is_file() => app.open_file(p, &cc.egui_ctx),
-            Some(p) => app.say(format!("{} non esiste", p.display()), true),
+            Some(p) => app.say(trf!("{} does not exist", "{} non esiste", p.display()), true),
             None => {}
         }
         if app.adobe.is_empty() {
-            app.say("Nessuna installazione di Lightroom/Camera Raw trovata: si usano i profili del file", false);
+            app.say(tr("No Lightroom/Camera Raw install found: using the profiles in the files", "Nessuna installazione di Lightroom/Camera Raw trovata: si usano i profili del file"), false);
         }
         app
     }
@@ -179,20 +214,25 @@ impl LumenApp {
     // Folders and photos
 
     fn open_folder(&mut self, dir: PathBuf, select: Option<&Path>, ctx: &egui::Context) {
+        // Absolute, so the folder is found again from anywhere.
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         self.stash_current();
         self.photos = library::scan_photos(&dir);
         self.thumbs = vec![None; self.photos.len()];
+        self.meta = vec![PhotoMeta::default(); self.photos.len()];
         self.thumbs_pending = self.photos.len();
+        self.selection.clear();
+        self.anchor = None;
         let generation = self.thumb_generation.fetch_add(1, Ordering::Relaxed) + 1;
         library::spawn_thumbnails(self.photos.clone(), generation, self.thumb_generation.clone(), self.thumb_tx.clone(), ctx.clone());
         self.folder = Some(dir);
         let index = select.and_then(|s| self.photos.iter().position(|p| p == s)).or((!self.photos.is_empty()).then_some(0));
         match index {
-            Some(i) => self.open_photo(i),
+            Some(i) => self.select_only(i),
             None => {
                 self.current = None;
                 self.selected = None;
-                self.say("Nessuna foto nella cartella", false);
+                self.say(tr("No photos in this folder", "Nessuna foto nella cartella"), false);
             }
         }
     }
@@ -204,10 +244,167 @@ impl LumenApp {
         self.open_folder(dir, Some(&file), ctx);
     }
 
-    /// Keeps the edit of the open photo for when it is opened again.
+    /// Saves the edit of the open photo and keeps it, with its history, for
+    /// when the photo is opened again.
     fn stash_current(&mut self) {
+        self.autosave(true);
         if let Some(c) = self.current.take() {
             self.edits.insert(c.path, (c.edit, c.history));
+        }
+    }
+
+    /// Writes the open photo's sidecar once the edit has been still for a
+    /// moment (or now, with `force`). Nothing is written for a photo that
+    /// was never edited.
+    fn autosave(&mut self, force: bool) {
+        let Some(c) = &mut self.current else { return };
+        if c.edit != c.seen {
+            c.seen = c.edit.clone();
+            c.changed_at = Instant::now();
+        }
+        if c.edit == c.saved || !(force || c.changed_at.elapsed() >= AUTOSAVE_DELAY) {
+            return;
+        }
+        let result = write_sidecar(&c.path, &c.edit, c.kind);
+        c.saved = c.edit.clone();
+        if let Err(e) = result {
+            self.say(trf!("Could not save: {e}", "Salvataggio non riuscito: {e}"), true);
+        }
+    }
+
+    /// Opens photo `i` and makes it the whole selection (a plain click).
+    fn select_only(&mut self, i: usize) {
+        self.selection = BTreeSet::from([i]);
+        self.anchor = Some(i);
+        self.open_photo(i);
+    }
+
+    /// A click in the filmstrip, with ⌘/Ctrl to add or remove one photo
+    /// and ⇧ for a range, as in Lightroom.
+    fn click_photo(&mut self, i: usize, modifiers: Modifiers) {
+        if modifiers.shift {
+            let a = self.anchor.or(self.selected).unwrap_or(i);
+            self.selection = (a.min(i)..=a.max(i)).collect();
+            self.open_photo(i);
+        } else if modifiers.command {
+            if self.selection.contains(&i) && self.selection.len() > 1 {
+                self.selection.remove(&i);
+                if self.selected == Some(i) {
+                    let next = *self.selection.iter().next().unwrap();
+                    self.open_photo(next);
+                }
+            } else {
+                self.selection.insert(i);
+                self.open_photo(i);
+            }
+            self.anchor = Some(i);
+        } else {
+            self.select_only(i);
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.selection = (0..self.photos.len()).collect();
+    }
+
+    /// The photos an action applies to: the selection when several are
+    /// selected, otherwise the open one.
+    fn targets(&self) -> Vec<usize> {
+        if self.selection.len() > 1 {
+            self.selection.iter().copied().collect()
+        } else {
+            self.selected.into_iter().collect()
+        }
+    }
+
+    /// The edit of any photo of the folder: the open one, one opened
+    /// earlier, its sidecar, or the defaults.
+    fn edit_of(&self, path: &Path) -> Edit {
+        match &self.current {
+            Some(c) if c.path == path => c.edit.clone(),
+            _ => match self.edits.get(path) {
+                Some((e, _)) => e.clone(),
+                None => {
+                    let kind = library::source_kind(path);
+                    state::load_sidecar(path, kind).unwrap_or_else(|| Edit::defaults(kind))
+                }
+            },
+        }
+    }
+
+    /// Changes the edit of every target photo. The open photo's change is
+    /// an undo step and is saved by autosave; the others are saved now.
+    /// Returns how many photos changed and the errors.
+    fn modify_targets(&mut self, f: impl Fn(&mut Edit) -> Result<(), String>) -> (usize, Vec<String>) {
+        let (mut changed, mut errors) = (0, Vec::new());
+        for i in self.targets() {
+            let Some(path) = self.photos.get(i).cloned() else { continue };
+            if let Some(c) = self.current.as_mut().filter(|c| c.path == path) {
+                match f(&mut c.edit) {
+                    Ok(()) => {
+                        c.history.checkpoint(&c.edit);
+                        changed += 1;
+                    }
+                    Err(e) => errors.push(format!("{}: {e}", file_name(&path))),
+                }
+                continue;
+            }
+            let kind = library::source_kind(&path);
+            let (mut edit, mut history) = self.edits.remove(&path).unwrap_or_else(|| {
+                let e = self.edit_of(&path);
+                let h = History::new(&e);
+                (e, h)
+            });
+            match f(&mut edit) {
+                Ok(()) => {
+                    history.checkpoint(&edit);
+                    changed += 1;
+                    if let Err(e) = write_sidecar(&path, &edit, kind) {
+                        errors.push(e);
+                    }
+                }
+                Err(e) => errors.push(format!("{}: {e}", file_name(&path))),
+            }
+            self.edits.insert(path, (edit, history));
+        }
+        (changed, errors)
+    }
+
+    fn copy_settings(&mut self) {
+        if let Some(c) = &self.current {
+            self.clipboard = Some(c.edit.clone());
+            self.say(trf!("Settings of {} copied", "Impostazioni di {} copiate", file_name(&c.path)), false);
+        }
+    }
+
+    fn paste_settings(&mut self) {
+        let Some(copied) = self.clipboard.clone() else {
+            self.say(tr("No settings copied yet (⌘⇧C / Ctrl+Shift+C)", "Nessuna impostazione copiata (⌘⇧C / Ctrl+Shift+C)"), true);
+            return;
+        };
+        let (n, errors) = self.modify_targets(|e| {
+            e.paste(&copied);
+            Ok(())
+        });
+        self.report(trf!("Settings pasted to {n} photos", "Impostazioni incollate su {n} foto"), errors);
+    }
+
+    fn report(&mut self, ok: String, errors: Vec<String>) {
+        match errors.first() {
+            Some(e) => self.say(trf!("{ok}; {} errors: {e}", "{ok}; {} errori: {e}", errors.len()), true),
+            None => self.say(ok, false),
+        }
+    }
+
+    /// Whether photo `i` carries an edit (in this session or on disk).
+    fn is_modified(&self, i: usize) -> bool {
+        let path = &self.photos[i];
+        match &self.current {
+            Some(c) if &c.path == path => c.edit.is_modified(c.kind),
+            _ => match self.edits.get(path) {
+                Some((e, _)) => e.is_modified(library::source_kind(path)),
+                None => self.meta[i].saved_edit,
+            },
         }
     }
 
@@ -217,7 +414,7 @@ impl LumenApp {
             return;
         }
         self.stash_current();
-        let kind = if raw::is_rendered_image(&path) { SourceKind::Rendered } else { SourceKind::Raw };
+        let kind = library::source_kind(&path);
         let (edit, history) = self.edits.remove(&path).unwrap_or_else(|| {
             let edit = state::load_sidecar(&path, kind).unwrap_or_else(|| Edit::defaults(kind));
             let history = History::new(&edit);
@@ -234,6 +431,9 @@ impl LumenApp {
             info: None,
             full_size: [0, 0],
             decode_ms: 0,
+            saved: edit.clone(),
+            seen: edit.clone(),
+            changed_at: Instant::now(),
             edit,
             history,
         });
@@ -244,6 +444,7 @@ impl LumenApp {
         self.before = None;
         self.histogram = None;
         self.white_balance = None;
+        self.as_shot = None;
         self.notes.clear();
         self.last_sent = None;
         self.hover_cache = None;
@@ -255,10 +456,11 @@ impl LumenApp {
             return;
         }
         let i = self.selected.map_or(0, |i| (i as isize + delta).clamp(0, self.photos.len() as isize - 1) as usize);
-        self.open_photo(i);
+        self.select_only(i);
     }
 
     fn set_preset_folder(&mut self, dir: PathBuf, ctx: &egui::Context) {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let d = dir.clone();
@@ -274,20 +476,16 @@ impl LumenApp {
     // ------------------------------------------------------------------
     // Editing
 
+    /// Applies a preset to the open photo, or to all the selected ones.
     fn apply_preset(&mut self, index: usize) {
         let Some(entry) = self.presets.get(index).cloned() else { return };
-        let Some(c) = &mut self.current else { return };
-        match apply_entry(&mut c.edit, &entry) {
-            Ok(()) => {
-                c.history.checkpoint(&c.edit);
-                self.say(format!("Preset applicato: {}", entry.name), false);
-            }
-            Err(e) => self.say(format!("{}: {e}", entry.name), true),
-        }
+        let (n, errors) = self.modify_targets(|e| apply_entry(e, &entry));
+        let ok = if n > 1 { trf!("Preset {} applied to {n} photos", "Preset {} applicato a {n} foto", entry.name) } else { trf!("Preset applied: {}", "Preset applicato: {}", entry.name) };
+        self.report(ok, errors);
     }
 
     fn load_lut_dialog(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("LUT", &["cube", "3dl"]).set_title("Carica LUT").pick_file() else { return };
+        let Some(path) = rfd::FileDialog::new().add_filter("LUT", &["cube", "3dl"]).set_title(tr("Load LUT", "Carica LUT")).pick_file() else { return };
         match lut::load(&path) {
             Ok(cube) => {
                 if let Some(c) = &mut self.current {
@@ -304,7 +502,7 @@ impl LumenApp {
     fn undo(&mut self) {
         if let Some(c) = &mut self.current {
             if !c.history.undo(&mut c.edit) {
-                self.say("Niente da annullare", false);
+                self.say(tr("Nothing to undo", "Niente da annullare"), false);
             }
         }
     }
@@ -312,7 +510,7 @@ impl LumenApp {
     fn redo(&mut self) {
         if let Some(c) = &mut self.current {
             if !c.history.redo(&mut c.edit) {
-                self.say("Niente da ripetere", false);
+                self.say(tr("Nothing to redo", "Niente da ripetere"), false);
             }
         }
     }
@@ -325,23 +523,32 @@ impl LumenApp {
     }
 
     fn save_sidecar(&mut self) {
-        let Some(c) = &self.current else { return };
+        let Some(c) = &mut self.current else { return };
         match state::save_sidecar(&c.path, &c.edit) {
-            Ok(p) => self.say(format!("Impostazioni salvate in {}", p.display()), false),
+            Ok(p) => {
+                c.saved = c.edit.clone();
+                self.say(trf!("Settings saved to {}", "Impostazioni salvate in {}", p.display()), false)
+            }
             Err(e) => self.say(e, true),
         }
     }
 
+    /// Exports the open photo, or all the selected ones, in the background.
     fn start_export(&mut self, ctx: &egui::Context) {
-        let Some(c) = &self.current else { return };
-        if !c.loaded {
+        let jobs: Vec<ExportJob> = self
+            .targets()
+            .into_iter()
+            .filter_map(|i| self.photos.get(i))
+            .map(|p| ExportJob { photo: p.clone(), edit: self.edit_of(p) })
+            .collect();
+        if jobs.is_empty() {
             return;
         }
-        let out = self.export.output_path(&c.path, c.full_size, c.edit.preset_name.as_deref());
-        let opts = ExportOptions { size: self.export.size(), format: self.export.format(), sharpen: self.export.sharpen };
-        export_ui::spawn_export(c.path.clone(), c.edit.clone(), out.clone(), opts, self.adobe.clone(), self.export_tx.clone(), ctx.clone());
+        let n = jobs.len();
+        export_ui::spawn_export(jobs, self.export.clone(), self.adobe.clone(), self.export_tx.clone(), ctx.clone());
         self.exporting += 1;
-        self.say(format!("Esportazione di {}…", file_name(&out)), false);
+        self.export_progress = Some((0, n));
+        self.say(if n > 1 { trf!("Exporting {n} photos…", "Esportazione di {n} foto…") } else { tr("Exporting…", "Esportazione…").to_string() }, false);
     }
 
     // ------------------------------------------------------------------
@@ -384,15 +591,18 @@ impl LumenApp {
                     self.render_ms = r.ms;
                     self.render_quality = r.quality;
                     self.white_balance = r.white_balance;
+                    self.as_shot = r.as_shot;
                     self.notes = r.notes;
                 }
                 _ => {}
             }
         }
-        while let Ok((generation, i, image)) = self.thumb_rx.try_recv() {
-            if generation == self.thumb_generation.load(Ordering::Relaxed) && i < self.thumbs.len() {
+        while let Ok(t) = self.thumb_rx.try_recv() {
+            let i = t.index;
+            if t.generation == self.thumb_generation.load(Ordering::Relaxed) && i < self.thumbs.len() {
                 self.thumbs_pending = self.thumbs_pending.saturating_sub(1);
-                self.thumbs[i] = image.map(|image| ctx.load_texture(format!("thumb-{i}"), image, tex_opts));
+                self.thumbs[i] = t.image.map(|image| ctx.load_texture(format!("thumb-{i}"), image, tex_opts));
+                self.meta[i] = PhotoMeta { creator: t.creator, saved_edit: t.saved_edit };
             }
         }
         if let Some(rx) = &self.preset_rx {
@@ -402,12 +612,32 @@ impl LumenApp {
             }
         }
         while let Ok(e) = self.export_rx.try_recv() {
-            self.exporting = self.exporting.saturating_sub(1);
             match e {
-                ExportEvent::Done { path, size, ms } => {
-                    self.say(format!("Esportato {} ({} × {}, {:.1} s)", path.display(), size[0], size[1], ms as f64 / 1000.0), false)
+                ExportEvent::Started { index, total, photo } => {
+                    self.export_progress = Some((index, total));
+                    self.say(trf!("Exporting {}/{total}: {}…", "Esportazione {}/{total}: {}…", index + 1, file_name(&photo)), false);
                 }
-                ExportEvent::Failed { path, error } => self.say(format!("Esportazione di {} fallita: {error}", path.display()), true),
+                ExportEvent::Done { path, size } => {
+                    if self.script.is_some() {
+                        eprintln!("exported {} ({} × {})", path.display(), size[0], size[1]);
+                    }
+                }
+                ExportEvent::Failed { photo, error } => {
+                    self.say(trf!("Export of {} failed: {error}", "Esportazione di {} fallita: {error}", file_name(&photo)), true);
+                }
+                ExportEvent::Finished { written, failed, ms } => {
+                    self.exporting = self.exporting.saturating_sub(1);
+                    if self.exporting == 0 {
+                        self.export_progress = None;
+                    }
+                    let secs = ms as f64 / 1000.0;
+                    let folder = self.export.folder.clone().or_else(|| self.folder.clone()).unwrap_or_default();
+                    if failed == 0 {
+                        self.say(trf!("Exported {written} photos to {} ({secs:.1} s)", "Esportate {written} foto in {} ({secs:.1} s)", file_name(&folder)), false);
+                    } else {
+                        self.say(trf!("Exported {written} photos, {failed} failed ({secs:.1} s)", "Esportate {written} foto, {failed} non riuscite ({secs:.1} s)"), true);
+                    }
+                }
             }
         }
     }
@@ -455,6 +685,12 @@ impl LumenApp {
         if pressed(shortcut(cmd | Modifiers::SHIFT, Key::E)) {
             self.export_open = self.current.is_some();
         }
+        if pressed(shortcut(cmd | Modifiers::SHIFT, Key::C)) {
+            self.copy_settings();
+        }
+        if pressed(shortcut(cmd | Modifiers::SHIFT, Key::V)) {
+            self.paste_settings();
+        }
         if pressed(shortcut(cmd, Key::O)) {
             self.pick_folder(ctx);
         }
@@ -463,6 +699,9 @@ impl LumenApp {
         }
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        if pressed(shortcut(cmd, Key::A)) {
+            self.select_all();
         }
         if pressed(shortcut(cmd | Modifiers::SHIFT, Key::Z)) || pressed(shortcut(cmd, Key::Y)) {
             self.redo();
@@ -499,7 +738,7 @@ impl LumenApp {
                         Ok(()) => c.history.checkpoint(&c.edit),
                         Err(e) => self.say(e, true),
                     },
-                    (None, _) => self.say(format!("{} non è un preset", f.display()), true),
+                    (None, _) => self.say(trf!("{} is not a preset", "{} non è un preset", f.display()), true),
                     _ => {}
                 }
             } else if library::is_photo(&f) {
@@ -509,7 +748,7 @@ impl LumenApp {
     }
 
     fn pick_folder(&mut self, ctx: &egui::Context) {
-        let mut dialog = rfd::FileDialog::new().set_title("Apri cartella");
+        let mut dialog = rfd::FileDialog::new().set_title(tr("Open folder", "Apri cartella"));
         if let Some(d) = &self.folder {
             dialog = dialog.set_directory(d);
         }
@@ -520,7 +759,7 @@ impl LumenApp {
 
     fn pick_file(&mut self, ctx: &egui::Context) {
         let exts = ["dng", "rw2", "cr2", "cr3", "nef", "arw", "raf", "orf", "pef", "srw", "jpg", "jpeg", "png", "tif", "tiff"];
-        let mut dialog = rfd::FileDialog::new().set_title("Apri foto").add_filter("Foto", &exts);
+        let mut dialog = rfd::FileDialog::new().set_title(tr("Open photo", "Apri foto")).add_filter(tr("Photos", "Foto"), &exts);
         if let Some(d) = &self.folder {
             dialog = dialog.set_directory(d);
         }
@@ -530,7 +769,7 @@ impl LumenApp {
     }
 
     fn pick_preset_folder(&mut self, ctx: &egui::Context) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Cartella dei preset").pick_folder() {
+        if let Some(dir) = rfd::FileDialog::new().set_title(tr("Preset folder", "Cartella dei preset")).pick_folder() {
             self.set_preset_folder(dir, ctx);
         }
     }
@@ -545,55 +784,71 @@ impl LumenApp {
         let (cmd, shift) = (Modifiers::COMMAND, Modifiers::COMMAND | Modifiers::SHIFT);
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.add(egui::Button::new("Apri cartella…").shortcut_text(keys(cmd, Key::O))).clicked() {
+                if ui.add(egui::Button::new(tr("Open folder…", "Apri cartella…")).shortcut_text(keys(cmd, Key::O))).clicked() {
                     ui.close();
                     self.pick_folder(&ctx);
                 }
-                if ui.button("Apri file…").clicked() {
+                if ui.button(tr("Open file…", "Apri file…")).clicked() {
                     ui.close();
                     self.pick_file(&ctx);
                 }
-                if ui.button("Cartella preset…").clicked() {
+                if ui.button(tr("Preset folder…", "Cartella preset…")).clicked() {
                     ui.close();
                     self.pick_preset_folder(&ctx);
                 }
-                if ui.add_enabled(self.current.is_some(), egui::Button::new("Carica LUT…")).clicked() {
+                if ui.add_enabled(self.current.is_some(), egui::Button::new(tr("Load LUT…", "Carica LUT…"))).clicked() {
                     ui.close();
                     self.load_lut_dialog();
                 }
                 ui.separator();
-                let raw = self.current.as_ref().is_some_and(|c| state::sidecar_path(&c.path).is_some());
-                if ui.add_enabled(raw, egui::Button::new("Salva impostazioni (.xmp)").shortcut_text(keys(cmd, Key::S))).clicked() {
+                if ui.add_enabled(self.current.is_some(), egui::Button::new(tr("Save settings (.xmp)", "Salva impostazioni (.xmp)")).shortcut_text(keys(cmd, Key::S))).clicked() {
                     ui.close();
                     self.save_sidecar();
                 }
-                if ui.add_enabled(self.current.is_some(), egui::Button::new("Esporta…").shortcut_text(keys(shift, Key::E))).clicked() {
+                let n = self.targets().len();
+                let label = if n > 1 { trf!("Export {n} photos…", "Esporta {n} foto…") } else { tr("Export…", "Esporta…").to_string() };
+                if ui.add_enabled(self.current.is_some(), egui::Button::new(label).shortcut_text(keys(shift, Key::E))).clicked() {
                     ui.close();
                     self.export_open = true;
                 }
                 ui.separator();
-                if ui.button("Esci").clicked() {
+                if ui.button(tr("Quit", "Esci")).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Modifica", |ui| {
+            ui.menu_button(tr("Edit", "Modifica"), |ui| {
                 let (can_undo, can_redo) = self.current.as_ref().map_or((false, false), |c| (c.history.can_undo(&c.edit), c.history.can_redo()));
-                if ui.add_enabled(can_undo, egui::Button::new("Annulla").shortcut_text(keys(cmd, Key::Z))).clicked() {
+                if ui.add_enabled(can_undo, egui::Button::new(tr("Undo", "Annulla")).shortcut_text(keys(cmd, Key::Z))).clicked() {
                     ui.close();
                     self.undo();
                 }
-                if ui.add_enabled(can_redo, egui::Button::new("Ripeti").shortcut_text(keys(shift, Key::Z))).clicked() {
+                if ui.add_enabled(can_redo, egui::Button::new(tr("Redo", "Ripeti")).shortcut_text(keys(shift, Key::Z))).clicked() {
                     ui.close();
                     self.redo();
                 }
                 ui.separator();
-                if ui.add_enabled(self.current.is_some(), egui::Button::new("Reimposta tutto")).clicked() {
+                if ui.add_enabled(self.current.is_some(), egui::Button::new(tr("Copy settings", "Copia impostazioni")).shortcut_text(keys(shift, Key::C))).clicked() {
+                    ui.close();
+                    self.copy_settings();
+                }
+                let n = self.targets().len();
+                let label = if n > 1 { trf!("Paste settings to {n} photos", "Incolla impostazioni su {n} foto") } else { tr("Paste settings", "Incolla impostazioni").to_string() };
+                if ui.add_enabled(self.clipboard.is_some(), egui::Button::new(label).shortcut_text(keys(shift, Key::V))).clicked() {
+                    ui.close();
+                    self.paste_settings();
+                }
+                if ui.add_enabled(!self.photos.is_empty(), egui::Button::new(tr("Select all", "Seleziona tutte")).shortcut_text(keys(cmd, Key::A))).clicked() {
+                    ui.close();
+                    self.select_all();
+                }
+                ui.separator();
+                if ui.add_enabled(self.current.is_some(), egui::Button::new(tr("Reset all", "Reimposta tutto"))).clicked() {
                     ui.close();
                     self.reset_edit();
                 }
             });
-            ui.menu_button("Vista", |ui| {
-                if ui.button("Adatta").clicked() {
+            ui.menu_button(tr("View", "Vista"), |ui| {
+                if ui.button(tr("Fit", "Adatta")).clicked() {
                     ui.close();
                     self.viewer.zoom = viewer::Zoom::Fit;
                 }
@@ -601,7 +856,7 @@ impl LumenApp {
                     ui.close();
                     self.viewer.zoom = viewer::Zoom::Ratio(1.0);
                 }
-                if ui.add(egui::Button::new("Prima / Dopo").shortcut_text("\\")).clicked() {
+                if ui.add(egui::Button::new(tr("Before / After", "Prima / Dopo")).shortcut_text("\\")).clicked() {
                     ui.close();
                     self.viewer.show_before = !self.viewer.show_before;
                 }
@@ -614,28 +869,31 @@ impl LumenApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Preset").strong().size(15.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Cartella…").on_hover_text("Scegli la cartella dei preset (.xmp, .dng, .cube)").clicked() {
+                if ui.small_button(tr("Folder…", "Cartella…")).on_hover_text(tr("Choose the preset folder (.xmp, .dng, .cube)", "Scegli la cartella dei preset (.xmp, .dng, .cube)")).clicked() {
                     self.pick_preset_folder(&ctx);
                 }
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut self.preset_filter).hint_text("Cerca…").desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut self.preset_filter).hint_text(tr("Search…", "Cerca…")).desired_width(f32::INFINITY));
         ui.separator();
         self.hover_preset = None;
         if self.preset_folder.is_none() {
-            ui.label(RichText::new("Scegli una cartella di preset Lightroom (.xmp, .dng \"mobile\") o LUT (.cube).").color(theme::TEXT_DIM));
+            ui.label(RichText::new(tr("Choose a folder of Lightroom presets (.xmp, mobile .dng) or LUTs (.cube).", "Scegli una cartella di preset Lightroom (.xmp, .dng \"mobile\") o LUT (.cube).")).color(theme::TEXT_DIM));
             return;
         }
         if self.preset_rx.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Lettura dei preset…");
+                ui.label(tr("Reading presets…", "Lettura dei preset…"));
             });
             return;
         }
         if self.presets.is_empty() {
-            ui.label(RichText::new("Nessun preset nella cartella").color(theme::TEXT_DIM));
+            ui.label(RichText::new(tr("No presets in this folder", "Nessun preset nella cartella")).color(theme::TEXT_DIM));
             return;
+        }
+        if self.selection.len() > 1 {
+            ui.label(RichText::new(trf!("A click applies the preset to the {} selected photos", "Il clic applica il preset alle {} foto selezionate", self.selection.len())).color(theme::ACCENT).size(11.5));
         }
         let filter = self.preset_filter.to_lowercase();
         let enabled = self.current.as_ref().is_some_and(|c| c.loaded);
@@ -653,8 +911,8 @@ impl LumenApp {
                             continue;
                         }
                         let (icon, tip) = match &p.kind {
-                            PresetKind::Develop(pr) if pr.preset_type.as_deref() == Some("Look") => ("◐", "Profilo".to_string()),
-                            PresetKind::Develop(_) => ("●", "Preset di sviluppo".to_string()),
+                            PresetKind::Develop(pr) if pr.preset_type.as_deref() == Some("Look") => ("◐", tr("Profile", "Profilo").to_string()),
+                            PresetKind::Develop(_) => ("●", tr("Develop preset", "Preset di sviluppo").to_string()),
                             PresetKind::Lut(_) => ("▦", "LUT 3D".to_string()),
                             PresetKind::Broken(e) => ("⚠", e.clone()),
                         };
@@ -689,10 +947,10 @@ impl LumenApp {
         }
         ui.separator();
         let Some(c) = &mut self.current else {
-            ui.label(RichText::new("Nessuna foto aperta").color(theme::TEXT_DIM));
+            ui.label(RichText::new(tr("No photo open", "Nessuna foto aperta")).color(theme::TEXT_DIM));
             return;
         };
-        let input = PanelInput { kind: c.kind, white_balance: self.white_balance, histogram: self.histogram.as_ref() };
+        let input = PanelInput { kind: c.kind, white_balance: self.white_balance, histogram: self.histogram.as_ref(), as_shot: self.as_shot };
         let mut actions = Vec::new();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_enabled_ui(c.loaded, |ui| {
@@ -709,28 +967,60 @@ impl LumenApp {
 
     fn filmstrip(&mut self, ui: &mut Ui) {
         let height = ui.available_height() - 4.0;
+        let label_h = 16.0;
         let mut clicked = None;
+        let modifiers = ui.input(|i| i.modifiers);
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (i, path) in self.photos.iter().enumerate() {
-                    let cell = egui::vec2(height * 1.4, height);
+                for i in 0..self.photos.len() {
+                    let path = &self.photos[i];
+                    let cell = egui::vec2((height - label_h) * 1.4, height);
                     let (rect, resp) = ui.allocate_exact_size(cell, egui::Sense::click());
-                    let selected = self.selected == Some(i);
+                    let active = self.selected == Some(i);
+                    let in_selection = self.selection.contains(&i);
                     let painter = ui.painter_at(rect);
-                    painter.rect_filled(rect, 3.0, if selected { Color32::from_gray(70) } else { theme::PANEL_DARK });
-                    let inner = rect.shrink(5.0);
+                    let bg = if in_selection { Color32::from_gray(72) } else { theme::PANEL_DARK };
+                    painter.rect_filled(rect, 3.0, bg);
+                    let pic = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.max.y - label_h)).shrink(5.0);
                     match &self.thumbs[i] {
                         Some(t) => {
                             let [w, h] = t.size().map(|v| v as f32);
-                            let s = (inner.width() / w).min(inner.height() / h);
-                            let r = egui::Rect::from_center_size(inner.center(), egui::vec2(w * s, h * s));
+                            let s = (pic.width() / w).min(pic.height() / h);
+                            let r = egui::Rect::from_center_size(pic.center(), egui::vec2(w * s, h * s));
                             painter.image(t.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                         }
                         None => {
-                            painter.text(inner.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(16.0), theme::TEXT_DIM);
+                            painter.text(pic.center(), egui::Align2::CENTER_CENTER, "…", egui::FontId::proportional(16.0), theme::TEXT_DIM);
                         }
                     }
-                    if selected {
+
+                    // File type, top left: RAW formats stand out from JPEGs.
+                    let ext = path.extension().map(|e| e.to_string_lossy().to_uppercase()).unwrap_or_default();
+                    let is_raw = library::source_kind(path) == SourceKind::Raw;
+                    badge(&painter, pic.left_top() + egui::vec2(2.0, 2.0), &ext, if is_raw { theme::ACCENT } else { Color32::from_gray(90) });
+                    // Edited here (sidecar or this session), and files that
+                    // come out of Lightroom/Photoshop already.
+                    let mut tip = file_name(path);
+                    let mut x = pic.right() - 2.0;
+                    if self.is_modified(i) {
+                        x = badge_right(&painter, egui::pos2(x, pic.top() + 2.0), tr("edited", "modificata"), Color32::from_rgb(196, 140, 40));
+                        tip.push_str(tr("\nEdited (settings in the .xmp sidecar)", "\nModificata (impostazioni nel sidecar .xmp)"));
+                    }
+                    if let Some(c) = &self.meta[i].creator {
+                        let short = if c.contains("Lightroom") { "LR" } else if c.contains("Photoshop") { "PS" } else { "XMP" };
+                        badge_right(&painter, egui::pos2(x - 3.0, pic.top() + 2.0), short, Color32::from_rgb(120, 80, 160));
+                        tip.push_str(&format!("\n{}: {c}", tr("Written by", "Creata da")));
+                    }
+
+                    let name = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.bottom() - label_h - 1.0), egui::pos2(rect.right() - 4.0, rect.bottom()));
+                    // One line, elided in the middle of long names.
+                    let mut job = egui::text::LayoutJob::simple_singleline(file_name(path), egui::FontId::proportional(11.0), if active { theme::TEXT } else { theme::TEXT_DIM });
+                    job.wrap = egui::text::TextWrapping { max_width: name.width(), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+                    let galley = painter.layout_job(job);
+                    let galley_rect = egui::Align2::CENTER_TOP.anchor_size(name.center_top(), galley.size());
+                    painter.with_clip_rect(name).galley(galley_rect.min, galley, theme::TEXT);
+
+                    if active {
                         painter.rect_stroke(rect.shrink(1.0), 3.0, egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
                         if self.scroll_to_selected {
                             resp.scroll_to_me(Some(egui::Align::Center));
@@ -738,7 +1028,7 @@ impl LumenApp {
                     } else if resp.hovered() {
                         painter.rect_stroke(rect.shrink(1.0), 3.0, egui::Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Inside);
                     }
-                    let resp = resp.on_hover_text(file_name(path));
+                    let resp = resp.on_hover_text(tip);
                     if resp.clicked() {
                         clicked = Some(i);
                     }
@@ -747,7 +1037,7 @@ impl LumenApp {
         });
         self.scroll_to_selected = false;
         if let Some(i) = clicked {
-            self.open_photo(i);
+            self.click_photo(i, modifiers);
         }
     }
 
@@ -758,24 +1048,29 @@ impl LumenApp {
                 if c.loaded {
                     ui.label(RichText::new(format!("{} × {}", c.full_size[0], c.full_size[1])).color(theme::TEXT_DIM));
                     let q = match self.render_quality {
-                        Quality::Draft => "bozza",
-                        Quality::Preview => "anteprima",
-                        Quality::Full => "piena risoluzione",
+                        Quality::Draft => tr("draft", "bozza"),
+                        Quality::Preview => tr("preview", "anteprima"),
+                        Quality::Full => tr("full resolution", "piena risoluzione"),
                     };
-                    ui.label(RichText::new(format!("decodifica {} ms · sviluppo {} ms ({q})", c.decode_ms, self.render_ms)).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(trf!("decode {} ms · develop {} ms ({q})", "decodifica {} ms · sviluppo {} ms ({q})", c.decode_ms, self.render_ms)).color(theme::TEXT_DIM));
                 }
                 if !self.notes.is_empty() {
-                    ui.label(RichText::new(format!("ℹ {} note", self.notes.len())).color(theme::TEXT_DIM)).on_hover_text(self.notes.join("\n"));
+                    ui.label(RichText::new(trf!("ℹ {} notes", "ℹ {} note", self.notes.len())).color(theme::TEXT_DIM)).on_hover_text(self.notes.join("\n"));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some((i, n)) = self.export_progress {
+                    ui.add(egui::ProgressBar::new(i as f32 / n.max(1) as f32).desired_width(120.0).text(format!("{}/{n}", i + 1)));
+                }
                 if self.exporting > 0 {
                     ui.spinner();
                 }
                 if let Some((text, at, error)) = &self.message {
                     if at.elapsed() < Duration::from_secs(8) || self.exporting > 0 {
                         let color = if *error { ui.visuals().error_fg_color } else { theme::TEXT };
-                        ui.label(RichText::new(text).color(color));
+                        // Shortened to the room left by the photo's details.
+                        let text = RichText::new(text).color(color);
+                        ui.add(egui::Label::new(text.clone()).truncate()).on_hover_text(text);
                     }
                 }
             });
@@ -789,8 +1084,8 @@ impl LumenApp {
         });
         let message = match &self.current {
             None => Some(viewer::empty_message()),
-            Some(c) if c.error.is_some() => Some(format!("Impossibile aprire {}: {}", file_name(&c.path), c.error.as_deref().unwrap_or(""))),
-            Some(c) if !c.loaded || self.after.is_none() => Some(format!("Caricamento di {}…", file_name(&c.path))),
+            Some(c) if c.error.is_some() => Some(trf!("Cannot open {}: {}", "Impossibile aprire {}: {}", file_name(&c.path), c.error.as_deref().unwrap_or(""))),
+            Some(c) if !c.loaded || self.after.is_none() => Some(trf!("Loading {}…", "Caricamento di {}…", file_name(&c.path))),
             _ => None,
         };
         let after = self.after.as_ref();
@@ -818,9 +1113,10 @@ impl LumenApp {
             return;
         };
         let (path, full, preset) = (c.path.clone(), c.full_size, c.edit.preset_name.clone());
+        let count = self.targets().len();
         let modal = egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
             ui.set_width(460.0);
-            export_ui::dialog(ui, &mut self.export, &path, full, preset.as_deref())
+            export_ui::dialog(ui, &mut self.export, &path, full, preset.as_deref(), count)
         });
         match modal.inner {
             DialogResult::Export => {
@@ -844,6 +1140,7 @@ impl LumenApp {
             && self.preset_rx.is_none()
             && self.thumbs_pending == 0
             && self.exporting == 0
+            && self.current.as_ref().is_some_and(|c| c.edit == c.saved)
     }
 
     fn run_script(&mut self, ctx: &egui::Context) {
@@ -877,6 +1174,34 @@ impl LumenApp {
             Step::ExportDialog(open) => self.export_open = open,
             Step::Export => self.start_export(ctx),
             Step::Photo(d) => self.step_photo(d),
+            Step::Open(i) => self.select_only(i.min(self.photos.len().saturating_sub(1))),
+            Step::Select(sel) => match sel {
+                Selection::All => self.select_all(),
+                Selection::None => {
+                    if let Some(i) = self.selected {
+                        self.select_only(i);
+                    }
+                }
+                Selection::Only(list) => {
+                    if let Some(&first) = list.first() {
+                        self.select_only(first);
+                        for i in list.into_iter().filter(|i| *i < self.photos.len()) {
+                            self.selection.insert(i);
+                        }
+                    }
+                }
+                Selection::Add(i) => self.click_photo(i, Modifiers::COMMAND),
+                Selection::Range(i) => self.click_photo(i, Modifiers::SHIFT),
+            },
+            Step::Copy => self.copy_settings(),
+            Step::Paste => self.paste_settings(),
+            Step::Amount(a) => {
+                let as_shot = self.as_shot;
+                if let Some(c) = &mut self.current {
+                    c.edit.set_preset_amount(a, as_shot);
+                }
+            }
+            Step::ExportDir(dir) => self.export.folder = Some(dir),
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
@@ -929,8 +1254,15 @@ impl eframe::App for LumenApp {
         let scripted_drag = self.script.as_ref().is_some_and(Script::dragging);
         let idle = !ctx.input(|i| i.pointer.any_down()) && !ctx.egui_wants_keyboard_input() && !scripted_drag;
         if let Some(c) = &mut self.current {
+            c.edit.drop_stale_preset();
             if idle {
                 c.history.checkpoint(&c.edit);
+            }
+        }
+        if idle {
+            self.autosave(false);
+            if self.current.as_ref().is_some_and(|c| c.edit != c.saved) {
+                ctx.request_repaint_after(AUTOSAVE_DELAY);
             }
         }
         self.run_script(&ctx);
@@ -939,6 +1271,10 @@ impl eframe::App for LumenApp {
         if self.message.as_ref().is_some_and(|(_, at, _)| at.elapsed() < Duration::from_secs(9)) {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+    }
+
+    fn on_exit(&mut self) {
+        self.autosave(true);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -950,6 +1286,30 @@ impl eframe::App for LumenApp {
         }
         storage.set_string(KEY_EXPORT, self.export.to_storage());
     }
+}
+
+/// Saves an edit to the photo's sidecar; an unedited photo without a
+/// sidecar gets none.
+fn write_sidecar(path: &Path, edit: &Edit, kind: SourceKind) -> Result<(), String> {
+    if edit.is_modified(kind) || state::sidecar_path(path).exists() {
+        state::save_sidecar(path, edit)?;
+    }
+    Ok(())
+}
+
+/// A small label with a coloured background at `pos` (top left).
+fn badge(painter: &egui::Painter, pos: egui::Pos2, text: &str, fill: Color32) -> egui::Rect {
+    let galley = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(9.5), Color32::WHITE);
+    let rect = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(6.0, 2.0));
+    painter.rect_filled(rect, 2.0, fill);
+    painter.galley(pos + egui::vec2(3.0, 1.0), galley, Color32::WHITE);
+    rect
+}
+
+/// As [`badge`], right-aligned at `pos`; returns where the next one goes.
+fn badge_right(painter: &egui::Painter, pos: egui::Pos2, text: &str, fill: Color32) -> f32 {
+    let w = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(9.5), Color32::WHITE).size().x + 6.0;
+    badge(painter, egui::pos2(pos.x - w, pos.y), text, fill).left()
 }
 
 /// Applies a preset-panel entry to an edit.

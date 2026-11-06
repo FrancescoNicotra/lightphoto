@@ -7,6 +7,9 @@
 /samples/*.DNG
 /samples/pixls/
 
+# Working notes and plans, kept out of the repository
+/plan/
+
 # Machine-specific build settings (short target-dir for MSVC MAX_PATH)
 /.cargo/config.toml
 

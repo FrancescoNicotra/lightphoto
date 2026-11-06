@@ -67,6 +67,8 @@ pub struct Rendered {
     /// White balance in effect (raw files), for the Temp/Tint sliders when
     /// the setting is "As Shot", "Auto" or a named preset.
     pub white_balance: Option<(f32, f32)>,
+    /// The camera's white balance (raw files), for the preset amount.
+    pub as_shot: Option<(f32, f32)>,
     /// What is not reproduced, and which Adobe profiles are in use.
     pub notes: Vec<String>,
 }
@@ -262,10 +264,10 @@ impl WorkerState {
 
     fn render(&mut self, job: &RenderJob, quality: Quality) {
         let t = Instant::now();
-        let Some(Developed { img, white_balance, notes }) = self.develop(job, quality) else { return };
+        let Some(Developed { img, white_balance, as_shot, notes }) = self.develop(job, quality) else { return };
         let (image, histogram) = to_color_image(&img);
         let ms = t.elapsed().as_millis();
-        let r = Rendered { generation: job.generation, id: job.id, image, histogram, ms, quality, white_balance, notes };
+        let r = Rendered { generation: job.generation, id: job.id, image, histogram, ms, quality, white_balance, as_shot, notes };
         self.send(Event::Rendered(Box::new(r)));
     }
 
@@ -312,22 +314,24 @@ impl WorkerState {
         let mut img = pipeline.render(photo, &RenderOptions { max_size, full_size: Some(open.full_size) });
         pipeline.grain(&mut img);
 
-        let white_balance = photo.as_shot_white().map(|as_shot| {
-            let xy = pipeline.white_point(photo).unwrap_or(as_shot);
+        let temp_tint = |xy| {
             let tt = TempTint::from_xy(xy);
             (tt.temperature as f32, tt.tint as f32)
-        });
+        };
+        let as_shot = photo.as_shot_white();
+        let white_balance = as_shot.map(|a| temp_tint(pipeline.white_point(photo).unwrap_or(a)));
         let mut notes = notes;
         notes.extend(pipeline.warnings.iter().cloned());
-        Some(Developed { img, white_balance, notes })
+        Some(Developed { img, white_balance, as_shot: as_shot.map(temp_tint), notes })
     }
 }
 
-/// A developed image (with grain), the white balance in effect and notes
-/// for the user.
+/// A developed image (with grain), the white balance in effect, the
+/// camera's, and notes for the user.
 struct Developed {
     img: Image,
     white_balance: Option<(f32, f32)>,
+    as_shot: Option<(f32, f32)>,
     notes: Vec<String>,
 }
 

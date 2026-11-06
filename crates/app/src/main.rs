@@ -7,7 +7,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod blend;
 mod export_ui;
+mod i18n;
 mod library;
 mod panels;
 mod script;
@@ -49,6 +51,7 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    i18n::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Lumen")

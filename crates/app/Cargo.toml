@@ -19,3 +19,4 @@ image.workspace = true
 # Default features: wgpu backend, winit (x11 + wayland on Linux), accesskit.
 eframe = { version = "0.37", features = ["persistence"] }
 rfd = "0.17"
+sys-locale = "0.3.2"

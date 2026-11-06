@@ -1,78 +1,78 @@
-# Pipeline di sviluppo
+# Develop pipeline
 
-Implementata nel crate [`pipeline`](../crates/pipeline). Ogni pannello di Camera Raw è tradotto in un'operazione nostra. Gli algoritmi PV2012+ di Adobe non sono pubblici, quindi gli slider vanno nella stessa direzione con una forza simile, ma non danno risultati identici. Lo misuriamo con `tools/compare`.
+Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw panel is translated into an operation of our own. Adobe's PV2012+ algorithms are not public, so the sliders move in the same direction with a similar strength, but the results are not identical. `tools/compare` measures the difference.
 
-## Ordine
+## Order
 
-| # | Fase | Spazio | Note |
+| # | Stage | Space | Notes |
 |---|---|---|---|
-| 1 | **WB** | camera → ProPhoto lineare | `As Shot`, `Custom` (Temperature/Tint assolute con le matrici DNG), preset con nome (Daylight, Cloudy…), `Auto` (grey world). Sui JPEG/TIFF: `IncrementalTemperature/Tint` (±100 mired). |
-| 1b | **HueSatMap del profilo camera** | ProPhoto lineare | solo con un DCP Adobe (vedi sotto), interpolata tra i due illuminanti come le matrici |
-| 2 | **Calibrazione** | matrice 3×3 lineare | ogni primaria Rec.709 ruotata in tinta (±100 ≈ ±25°) e scalata in saturazione; il bianco resta bianco |
-| 3 | **Esposizione** | lineare | `Exposure2012` + `BaselineExposure` del DNG |
-| 4 | **Spalla** (solo RAW) | lineare | identità fino a 0,7, poi `tanh`: le alte luci oltre il clip restano recuperabili |
-| 4b | **LookTable** | ProPhoto lineare | quella del Look (es. Adobe Color), altrimenti quella del DCP |
-| 5 | **Curva di profilo** | lineare / Melissa* | solo RAW: `ProfileToneCurve` del DCP oppure, se manca (come in Adobe Standard, o senza DCP), la curva predefinita **ACR3** del DNG SDK ([`acr3.rs`](../crates/pipeline/src/acr3.rs)); applicata in lineare con il metodo "RGB tone" del SDK, che preserva la tinta. Poi la curva del Look (Adobe Color: S leggera) |
-| 6 | **Tabella RGB del profilo** | primarie e gamma dichiarate | `crs:RGBTable` dei profili creativi, con Amount |
-| 7 | **Base** | Melissa | Contrasto (curva a potenza attorno al grigio medio), Luci/Ombre (campane centrate a 0,75 e 0,25), Bianchi/Neri (estremi). **Globali**, non locali come in Adobe |
-| 8 | **Curve** | Melissa | parametrica (4 regioni con split) → punti master → R/G/B, con spline cubica monotona (Fritsch–Carlson) |
-| 9 | **ShadowTint** | Melissa | verde/magenta nelle ombre |
-| 10 | **NR colore** | Melissa | blur della crominanza, raggio ∝ Amount |
-| 11 | **Texture / Clarity** | luma Melissa | differenza da un blur (0,15% / 1,2% del lato lungo), pesata sui mezzitoni |
-| 12 | **Dehaze** | Melissa | modello globale a velo |
-| 13 | **Sharpening** | luma Melissa | unsharp mask: Radius, Detail (limite agli aloni), Masking (solo bordi) |
-| 14 | **Vignettatura post-crop** | Melissa | Amount, Midpoint, Roundness, Feather |
-| 15 | **HSL** | Rec.709 codificato → (Y, a, b) | 8 bande a pesi sovrapposti che sommano a 1. Hue ±100 = ±40°, Saturazione ±100 = ±13% di croma. La luminanza non tocca i grigi |
-| 16 | **Vibranza / Saturazione** | (Y, a, b) | la vibranza agisce di più sui colori spenti e protegge gli incarnati |
-| 17 | **Color grading** | (Y, a, b) | campane di luminanza per ombre/mezzitoni/luci (Blending ne regola la larghezza, Balance il centro), più la ruota globale |
-| 18 | **LUT .cube** (`--lut`) | sRGB codificato | per ultima, con amount |
-| 19 | **Grana** | dopo il resize | value noise a due ottave (Size, Frequency = Roughness), seed fisso |
+| 1 | **White balance** | camera → linear ProPhoto | `As Shot`, `Custom` (absolute Temperature/Tint through the DNG matrices), named presets (Daylight, Cloudy…), `Auto` (grey world). On JPEG/TIFF: `IncrementalTemperature/Tint` (±100 mired). |
+| 1b | **Camera profile HueSatMap** | linear ProPhoto | only with an Adobe DCP (see below), interpolated between the two illuminants like the matrices |
+| 2 | **Calibration** | linear 3×3 matrix | each Rec.709 primary rotated in hue (±100 ≈ ±25°) and scaled in saturation; white stays white |
+| 3 | **Exposure** | linear | `Exposure2012` + the DNG `BaselineExposure` |
+| 4 | **Shoulder** (raw only) | linear | identity up to 0.7, then `tanh`: highlights above clipping stay recoverable |
+| 4b | **LookTable** | linear ProPhoto | the Look's (e.g. Adobe Color), otherwise the DCP's |
+| 5 | **Profile curve** | linear / Melissa* | raw only: the DCP `ProfileToneCurve` or, when missing (as in Adobe Standard, or without a DCP), the DNG SDK default **ACR3** curve ([`acr3.rs`](../crates/pipeline/src/acr3.rs)); applied in linear with the SDK's hue-preserving "RGB tone" method. Then the Look's curve (Adobe Color: a gentle S) |
+| 6 | **Profile RGB table** | declared primaries and gamma | `crs:RGBTable` of creative profiles, with Amount |
+| 7 | **Basic** | Melissa | Contrast (power curve around mid grey), Highlights/Shadows (bells centred at 0.75 and 0.25), Whites/Blacks (ends). **Global**, not local as in Adobe |
+| 8 | **Curves** | Melissa | parametric (4 regions with splits) → master points → R/G/B, monotone cubic spline (Fritsch–Carlson) |
+| 9 | **ShadowTint** | Melissa | green/magenta in the shadows |
+| 10 | **Colour NR** | Melissa | chroma blur, radius ∝ Amount |
+| 11 | **Texture / Clarity** | Melissa luma | difference from a blur (0.15% / 1.2% of the long edge), weighted towards the midtones |
+| 12 | **Dehaze** | Melissa | global veil model |
+| 13 | **Sharpening** | Melissa luma | unsharp mask: Radius, Detail (halo limit), Masking (edges only) |
+| 14 | **Post-crop vignette** | Melissa | Amount, Midpoint, Roundness, Feather |
+| 15 | **HSL** | encoded Rec.709 → (Y, a, b) | 8 overlapping bands whose weights sum to 1. Hue ±100 = ±40°, Saturation ±100 = ±13% chroma. Luminance leaves greys alone |
+| 16 | **Vibrance / Saturation** | (Y, a, b) | vibrance acts more on dull colours and protects skin tones |
+| 17 | **Colour grading** | (Y, a, b) | luminance bells for shadows/midtones/highlights (Blending sets their width, Balance their centre), plus the global wheel |
+| 18 | **.cube LUT** (`--lut`) | encoded sRGB | last, with an amount |
+| 19 | **Grain** | after resizing | two-octave value noise (Size, Frequency = Roughness), fixed seed |
 
-\* *Melissa* = primarie ProPhoto con la curva di trasferimento sRGB, lo spazio delle curve e dei valori RGB di Lightroom.
+\* *Melissa* = ProPhoto primaries with the sRGB transfer curve, the space of Lightroom's curves and RGB readouts.
 
-## Profili Adobe installati
+## Installed Adobe profiles
 
-I preset citano i profili senza includerli: "Adobe Color" è `Stubbed` e il DNG riporta solo l'hash della sua LookTable. Se sul computer c'è un'installazione di Lightroom, Lightroom Classic o Camera Raw, `pipeline::adobe` la usa così:
+Presets name profiles without including them: "Adobe Color" is `Stubbed`, and a DNG only carries the hash of its LookTable. When Lightroom, Lightroom Classic or Camera Raw is installed, `pipeline::adobe` uses it:
 
-- **Profilo camera**: `CameraProfiles/Adobe Standard/<marca> <modello> Adobe Standard.dcp` (o quello che il Look chiede in `crs:CameraProfile`). Se il nome non corrisponde, cerca tra i DCP della stessa marca quello con la stessa ColorMatrix: così la GX80 trova il profilo "Panasonic DMC-GX85". Il DCP sostituisce le matrici del file e aggiunge HueSatMap, LookTable ed eventuale curva.
-- **Look**: il file `.xmp` con lo stesso UUID sotto `Settings/…/Profiles/`, ad esempio `Adobe Raw/Adobe Color.xmp`, che contiene la LookTable (36×16×16) e la curva del profilo.
+- **Camera profile**: `CameraProfiles/Adobe Standard/<make> <model> Adobe Standard.dcp` (or the one the Look asks for in `crs:CameraProfile`). When no name matches, it looks among the same maker's DCPs for one with the same ColorMatrix: this is how the GX80 finds the "Panasonic DMC-GX85" profile. The DCP replaces the file's matrices and adds a HueSatMap, a LookTable and possibly a curve.
+- **Look**: the `.xmp` with the same UUID under `Settings/…/Profiles/`, for instance `Adobe Raw/Adobe Color.xmp`, which holds the LookTable (36×16×16) and the profile curve.
 
-Cartelle cercate: quelle in `LUMEN_ADOBE_DIR`; su macOS il bundle di Lightroom e Lightroom Classic e `/Library/Application Support/Adobe/CameraRaw`; su Windows `C:\ProgramData\Adobe\CameraRaw` e `%APPDATA%\Adobe\CameraRaw`. I file sono di Adobe: si leggono dall'installazione locale e non vengono copiati nel repository. `--no-adobe` li disattiva.
+Folders searched: those in `LUMEN_ADOBE_DIR`; on macOS the Lightroom and Lightroom Classic bundles and `/Library/Application Support/Adobe/CameraRaw`; on Windows `C:\ProgramData\Adobe\CameraRaw` and `%APPDATA%\Adobe\CameraRaw`. The files are Adobe's: they are read from the local install and never copied into the repository. `--no-adobe` turns them off.
 
-## Cosa manca o è approssimato
+## Missing or approximate
 
-- **Senza un'installazione Adobe** la LookTable di Adobe Color non è disponibile: applichiamo solo la sua curva, e la CLI lo segnala.
-- **Luci/Ombre, Texture, Clarity, Dehaze** sono globali o semplici. In Adobe sono filtri locali edge-aware (dopo l'MVP: guided filter).
-- **Riduzione rumore della luminanza** non implementata (la CLI lo segnala).
-- **Correzione delle lenti**: assente. La JPEG della fotocamera GX80, ad esempio, corregge la distorsione e quindi ha un'inquadratura più stretta.
-- **Profili ICC in ingresso** (JPEG/TIFF): si assume sRGB.
+- **Without an Adobe install** the Adobe Color LookTable is not available: only its curve is applied, and the CLI says so.
+- **Highlights/Shadows, Texture, Clarity, Dehaze** are global or simple. In Adobe they are local, edge-aware filters (a guided filter would get closer).
+- **Luminance noise reduction** is not implemented (the CLI says so).
+- **Lens correction**: absent. The GX80's own JPEG, for instance, corrects distortion and so has a tighter framing.
+- **Input ICC profiles** (JPEG/TIFF): sRGB is assumed.
 
-## Export `.cube`
+## `.cube` export
 
-`lumen-cli cube preset.xmp -o out.cube` (oppure `xmp-dump preset.xmp --cube out.cube`) campiona le fasi 2, 5–9 e 15–17 in modalità "immagine già renderizzata", con ingresso e uscita sRGB. WB, operazioni spaziali e grana non entrano in una LUT.
+`lumen-cli cube preset.xmp -o out.cube` (or `xmp-dump preset.xmp --cube out.cube`) samples stages 2, 5–9 and 15–17 in "already rendered image" mode, with sRGB in and out. White balance, spatial operations and grain cannot be part of a LUT.
 
-## Taratura contro Lightroom
+## Calibration against Lightroom
 
-Le intensità degli slider sono state tarate su un render vero di Lightroom: la JPEG della fotocamera GX80 (`samples/pixls/P1010041-camera.jpg`) con "Dreamy days in spring" applicato da Lightroom 12 per iOS. Con una ricerca a coordinate che minimizza il ΔE2000 medio a 480 px (dove la grana, casuale, si media):
+Slider strengths were fitted to a real Lightroom render: the GX80 camera JPEG (`samples/pixls/P1010041-camera.jpg`) with "Dreamy days in spring" applied by Lightroom 12 for iOS, by a coordinate search minimising the mean ΔE2000 at 480 px (where the random grain averages out):
 
-| Costante | Prima | Tarata |
+| Constant | Before | Fitted |
 |---|---|---|
-| Contrasto ±100 → esponente della curva | ±0,6 | ±0,25 |
-| Luci ±100 → spostamento massimo | ±0,15 | ±0,02 |
-| Ombre ±100 | ±0,15 | ±0,15 (invariata) |
-| HSL tinta ±100 | ±30° | ±40° |
-| HSL saturazione ±100 → croma | ±100% | ±13% |
-| HSL luminanza ±100 → luma | ±40% | ±80% |
-| Color grading saturazione 100 → croma aggiunta | 0,12 | 0,36 |
+| Contrast ±100 → curve exponent | ±0.6 | ±0.25 |
+| Highlights ±100 → maximum shift | ±0.15 | ±0.02 |
+| Shadows ±100 | ±0.15 | ±0.15 (unchanged) |
+| HSL hue ±100 | ±30° | ±40° |
+| HSL saturation ±100 → chroma | ±100% | ±13% |
+| HSL luminance ±100 → luma | ±40% | ±80% |
+| Colour grading saturation 100 → added chroma | 0.12 | 0.36 |
 
-Risultato: ΔE medio da 7,1 a **2,8** (test `matches_lightroom_on_the_camera_jpeg`). Limiti: è un'unica immagine con un unico preset, quindi alcune costanti possono compensarsi a vicenda (la saturazione HSL debolissima, per esempio, potrebbe nascondere un color grading o una vibranza diversi da quelli di Adobe). Per una taratura robusta servono export di Lightroom con **un solo slider alla volta**, che si possono fare gratis con le JPEG. Sui RAW resta da verificare: Luci/Ombre in Adobe sono locali e agiscono in modo diverso sui file a gamma dinamica estesa.
+Result: mean ΔE from 7.1 to **2.8** (test `matches_lightroom_on_the_camera_jpeg`). Limits: one image with one preset, so some constants may compensate for each other (the very weak HSL saturation, for example, could hide a colour grading or vibrance that differs from Adobe's). A robust calibration needs Lightroom exports with **one slider at a time**, which can be made for free from JPEGs. Raw files still need checking: Adobe's Highlights/Shadows are local and behave differently on high dynamic range files.
 
-## Verifica
+## Checking
 
 ```bash
-cargo run --release -p lumen-cli -- develop foto.dng --preset preset.xmp -o nostro.jpg
-cargo run --release -p lumen-cli -- preview foto.dng -o lightroom.jpg   # o un export fatto in Lightroom
-cargo run --release -p compare -- nostro.jpg lightroom.jpg --diff diff.png
+cargo run --release -p lumen-cli -- develop photo.dng --preset preset.xmp -o ours.jpg
+cargo run --release -p lumen-cli -- preview photo.dng -o lightroom.jpg   # or an export made in Lightroom
+cargo run --release -p compare -- ours.jpg lightroom.jpg --diff diff.png
 ```
 
-`compare` stampa il ΔE2000 medio, mediano e al 95° percentile, la Lab media delle due immagini e una mappa delle differenze (nero = 0, bianco ≥ 10). Il target per l'MVP è un ΔE medio < 3 contro Lightroom, e va misurato sul DNG "mobile version", che contiene la preview renderizzata da Lightroom con il preset. Sul RW2 di raw.pixls.us abbiamo come riferimento solo la JPEG della fotocamera, che ha un altro look e un'altra inquadratura: lì sono significative solo le medie (rendering di base con ACR3 e Adobe Standard: L* 39,2 contro 40,9, ΔE delle medie 3,6; la JPEG Panasonic è più satura per scelta).
+`compare` prints the mean, median and 95th-percentile ΔE2000, the mean Lab of both images and a difference map (black = 0, white ≥ 10). The reference that matters is a render by Lightroom itself with the same preset, such as the preview inside a "mobile" DNG. For the raw.pixls.us RW2 the only reference is the camera JPEG, which has another look and framing: there only the averages mean something (base rendering with ACR3 and Adobe Standard: L* 39.2 against 40.9, ΔE of the means 3.6; the Panasonic JPEG is more saturated by design).

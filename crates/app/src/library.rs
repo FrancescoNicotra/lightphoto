@@ -37,29 +37,65 @@ pub fn scan_photos(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// What the filmstrip shows about a photo besides its picture.
+pub struct Thumb {
+    pub generation: u64,
+    pub index: usize,
+    pub image: Option<egui::ColorImage>,
+    /// The program that wrote a JPEG/PNG/TIFF, from its XMP (e.g. "Adobe
+    /// Lightroom 12.0.0 (iOS)"): the file is an edit or an export already.
+    pub creator: Option<String>,
+    /// Its sidecar holds settings different from the defaults.
+    pub saved_edit: bool,
+}
+
 /// Loads thumbnails for `paths` on a background thread, in order. A newer
 /// call (higher `generation`) stops an older one.
-pub fn spawn_thumbnails(
-    paths: Vec<PathBuf>,
-    generation: u64,
-    current: Arc<AtomicU64>,
-    tx: Sender<(u64, usize, Option<egui::ColorImage>)>,
-    ctx: egui::Context,
-) {
+pub fn spawn_thumbnails(paths: Vec<PathBuf>, generation: u64, current: Arc<AtomicU64>, tx: Sender<Thumb>, ctx: egui::Context) {
     std::thread::Builder::new()
         .name("thumbnails".into())
         .spawn(move || {
-            for (i, path) in paths.iter().enumerate() {
+            for (index, path) in paths.iter().enumerate() {
                 if current.load(Ordering::Relaxed) != generation {
                     return;
                 }
-                if tx.send((generation, i, thumbnail(path))).is_err() {
+                let kind = source_kind(path);
+                let thumb = Thumb {
+                    generation,
+                    index,
+                    image: thumbnail(path),
+                    creator: creator_tool(path),
+                    saved_edit: crate::state::load_sidecar(path, kind).is_some_and(|e| e.is_modified(kind)),
+                };
+                if tx.send(thumb).is_err() {
                     return;
                 }
                 ctx.request_repaint();
             }
         })
         .expect("spawn thumbnail thread");
+}
+
+/// RAW or rendered, from the extension (the decoder may still disagree).
+pub fn source_kind(path: &Path) -> SourceKind {
+    if raw::is_rendered_image(path) {
+        SourceKind::Rendered
+    } else {
+        SourceKind::Raw
+    }
+}
+
+/// `xmp:CreatorTool` of a rendered file, or a note that it carries Camera
+/// Raw settings. RAW files are skipped: theirs names the camera.
+pub fn creator_tool(path: &Path) -> Option<String> {
+    if !raw::is_rendered_image(path) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let packet = xmp::XmpPacket::parse(&xmp::extract_xmp(&bytes)?).ok()?;
+    let tool = packet.props.get("http://ns.adobe.com/xap/1.0/", "CreatorTool").and_then(xmp::Value::as_text).map(str::to_string);
+    let has_settings = packet.props.crs("HasSettings").and_then(xmp::Value::as_bool) == Some(true);
+    tool.filter(|t| !t.is_empty()).or(has_settings.then(|| "Camera Raw settings".to_string()))
 }
 
 /// A small sRGB image of the photo: the preview embedded in RAW files, the
@@ -177,6 +213,18 @@ mod tests {
         let dreamy = presets.iter().find(|p| p.path.ends_with("Dreamy days in spring.xmp")).expect("sample preset");
         assert!(matches!(dreamy.kind, PresetKind::Develop(_)));
         assert!(!dreamy.name.is_empty());
+    }
+
+    #[test]
+    fn recognises_lightroom_exports() {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/pixls"));
+        let lr = dir.join("P1010041-camera-lightroom-dreamy.jpg");
+        if !lr.exists() {
+            eprintln!("skipping: {} not found", lr.display());
+            return;
+        }
+        assert!(creator_tool(&lr).is_some_and(|t| t.contains("Lightroom")));
+        assert_eq!(creator_tool(&dir.join("P1010041-camera.jpg")), None);
     }
 
     #[test]

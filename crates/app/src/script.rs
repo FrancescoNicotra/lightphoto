@@ -12,11 +12,18 @@
 //! undo | redo | reset
 //! before on|off             before/after view
 //! zoom fit|100|200
-//! panel <title>             open only this develop panel ("Base", "Curva"…)
+//! panel <key>               open only this develop panel: profile, basic, curve,
+//!                           hsl, grading, detail, effects, calibration
 //! tab curve|hsl|grading <n> select a tab inside a panel
+//! amount <0..200>           strength of the preset just applied (%)
 //! exportdialog | closedialog
-//! export                    export with the dialog's settings
+//! exportdir <folder>        output folder of the export dialog
+//! export                    export the selection with the dialog's settings
 //! next | prev               filmstrip navigation
+//! open <n>                  open photo n of the filmstrip (from 0)
+//! select all | none | <n>,<m>… | add <n> | range <n>
+//!                           filmstrip selection (as ⌘A, click, ⌘-click, ⇧-click)
+//! copy | paste              copy the open photo's settings, paste to the selection
 //! shot <file.png>           save a screenshot of the window
 //! quit
 //! ```
@@ -46,6 +53,14 @@ struct Drag {
     done: u32,
 }
 
+pub enum Selection {
+    All,
+    None,
+    Only(Vec<usize>),
+    Add(usize),
+    Range(usize),
+}
+
 /// What a step asks of the app.
 pub enum Step {
     Wait,
@@ -61,6 +76,12 @@ pub enum Step {
     ExportDialog(bool),
     Export,
     Photo(isize),
+    Open(usize),
+    Select(Selection),
+    Copy,
+    Paste,
+    Amount(f32),
+    ExportDir(PathBuf),
     Quit,
 }
 
@@ -140,6 +161,18 @@ impl Script {
             "exportdialog" => Step::ExportDialog(true),
             "closedialog" => Step::ExportDialog(false),
             "export" => Step::Export,
+            "open" => Step::Open(arg.parse().unwrap_or(0)),
+            "select" => Step::Select(match rest.first().copied() {
+                Some("all") => Selection::All,
+                Some("none") => Selection::None,
+                Some("add") => Selection::Add(rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(0)),
+                Some("range") => Selection::Range(rest.get(1).and_then(|n| n.parse().ok()).unwrap_or(0)),
+                _ => Selection::Only(arg.split(',').filter_map(|n| n.trim().parse().ok()).collect()),
+            }),
+            "copy" => Step::Copy,
+            "paste" => Step::Paste,
+            "amount" => Step::Amount(arg.parse().unwrap_or(100.0)),
+            "exportdir" => Step::ExportDir(PathBuf::from(arg)),
             "next" => Step::Photo(1),
             "prev" => Step::Photo(-1),
             "shot" => {

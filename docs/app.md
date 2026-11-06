@@ -1,58 +1,79 @@
-# App desktop
+# Desktop app
 
-Crate [`crates/app`](../crates/app), binario `lumen`, con [egui](https://github.com/emilk/egui)/eframe 0.37 (backend wgpu).
+The [`crates/app`](../crates/app) crate, executable `lumen`, built with [egui](https://github.com/emilk/egui)/eframe 0.37 (wgpu backend).
 
 ```bash
-cargo run --release -p app                                   # riapre l'ultima cartella
-cargo run --release -p app -- samples/pixls                  # una cartella
+cargo run --release -p app                                   # reopens the last folder
+cargo run --release -p app -- samples/pixls                  # a folder
 cargo run --release -p app -- samples/pixls/P1010041.RW2 --presets samples
 ```
 
-## Interfaccia
+## Language
 
-| Zona | Contenuto |
+The interface is in English, or in Italian when the operating system's language is Italian (read with `sys-locale`: the macOS preferred language, the Windows display language, `LANG` on Linux). `LUMEN_LANG=en` or `LUMEN_LANG=it` overrides it. Texts are written in [`i18n.rs`](../crates/app/src/i18n.rs) style, English next to Italian where they are used: `tr("Open folder…", "Apri cartella…")`.
+
+## Interface
+
+| Area | Content |
 |---|---|
-| Menu | **File**: Apri cartella (⌘O / Ctrl+O), Apri file, Cartella preset, Carica LUT, Salva impostazioni (.xmp, ⌘S), Esporta (⇧⌘E / Ctrl+Shift+E). **Modifica**: Annulla, Ripeti, Reimposta tutto. **Vista**: Adatta, 100%, Prima/Dopo |
-| Sinistra | preset della cartella scelta (`.xmp`, `.dng` "mobile", `.cube`/`.3dl`), raggruppati per gruppo o sottocartella, con ricerca. Passando sopra un preset l'anteprima lo mostra; il clic lo applica |
-| Centro | foto con Adatta / 100% / 200%; clic per passare da adatta a 100% nel punto cliccato, trascinamento per spostarsi, pinch o ⌘/Ctrl + rotella per lo zoom attorno al cursore. `\` mostra la foto prima delle modifiche |
-| Destra | istogramma RGB con indicatori di clipping e dati di scatto; pannelli Profilo e LUT (Amount del profilo e della LUT), Base (WB con preset e Temp/Tinta, tono, presenza), Curva di viraggio (parametrica, punti master modificabili, R/G/B), HSL (8 bande × tonalità/saturazione/luminanza), Color grading (ruote a 3 vie e globale, Fusione, Bilanciamento), Dettaglio, Effetti (vignettatura, grana), Calibrazione |
-| In basso | filmstrip della cartella aperta (preview incorporata nei RAW, l'immagine stessa per i JPEG/PNG/TIFF) e barra di stato con tempi di decodifica/sviluppo e note (profili Adobe usati, cosa è approssimato) |
+| Menu | **File**: Open folder (⌘O / Ctrl+O), Open file, Preset folder, Load LUT, Save settings (⌘S / Ctrl+S), Export (⇧⌘E / Ctrl+Shift+E). **Edit**: Undo, Redo, Copy settings (⇧⌘C / Ctrl+Shift+C), Paste settings (⇧⌘V / Ctrl+Shift+V), Select all (⌘A / Ctrl+A), Reset all. **View**: Fit, 100%, Before/After |
+| Left | presets of the chosen folder (`.xmp`, "mobile" `.dng`, `.cube`/`.3dl`), grouped by preset group or sub-folder, with search. Hovering a preset previews it; a click applies it to the open photo, or to every selected photo |
+| Centre | the photo: Fit / 100% / 200%; click to switch between fit and 100% at the clicked point, drag to pan, pinch or ⌘/Ctrl + wheel to zoom around the cursor. `\` shows the photo before the edits |
+| Right | RGB histogram with clipping marks and shooting data; preset **Amount**; panels Profile & LUT (amount of the profile and of the LUT), Basic (white balance presets and Temp/Tint, tone, presence), Tone curve (parametric, editable master points, R/G/B), HSL (8 bands × hue/saturation/luminance), Color grading (3-way and global wheels, Blending, Balance), Detail, Effects (vignette, grain), Calibration |
+| Bottom | filmstrip of the open folder and status bar with decode/develop times, notes (Adobe profiles in use, what is approximated) and export progress |
 
-Slider: doppio clic sull'etichetta o sulla barra riporta al valore predefinito; clic sul numero per scriverlo, trascinamento sul numero per regolarlo. Il doppio clic su Temp./Tinta torna al bilanciamento "Come scattato". Nella curva a punti: clic sulla curva per aggiungere un punto, trascinamento per spostarlo, doppio clic per toglierlo.
+Sliders: double-click the label or the track to reset; click the number to type a value, or drag on it. Double-clicking Temp./Tint goes back to the "As Shot" white balance. In the point curve: click on the curve to add a point, drag to move it, double-click to remove it.
 
-Altre scorciatoie (fuori dai campi di testo): ⌘Z / Ctrl+Z annulla, ⇧⌘Z / Ctrl+Shift+Z (o Ctrl+Y) ripete, `Z` adatta/100%, ← → foto precedente/successiva, Esc chiude il dialog di export. Si possono trascinare nella finestra cartelle, foto, preset `.xmp` e LUT.
+Other shortcuts (outside text fields): ⌘Z / Ctrl+Z undo, ⇧⌘Z / Ctrl+Shift+Z (or Ctrl+Y) redo, `Z` fit/100%, ← → previous/next photo, Esc closes the export dialog. Folders, photos, `.xmp` presets and LUTs can be dropped on the window.
 
-## Modifiche, undo e sidecar
+## Filmstrip
 
-- Applicare un preset cambia solo le chiavi che contiene, come in Lightroom: due preset in sequenza si sommano.
-- Undo/redo per istantanee: un gesto (un trascinamento, un valore scritto, un preset) è un passo. Le modifiche di ogni foto restano in memoria finché l'app è aperta.
-- **⌘S** salva le impostazioni nel sidecar `nome.xmp` accanto al RAW, compatibile con Lightroom (chiavi `crs:`; profilo e tabelle copiati dal preset). All'apertura il sidecar viene letto. Per JPEG/TIFF/PNG Lightroom scrive dentro il file, quindi lì non si salva nulla.
+Each photo shows its name, its file type (RAW types in blue), an **edited** badge when it carries settings (from this session or from its sidecar) and an **LR** / **PS** badge on JPEG/PNG/TIFF files whose XMP says they were written by Lightroom or Photoshop: they are edits or exports already, so a preset applied on top of them is applied twice. The tooltip names the program.
+
+Selection works as in Lightroom: a click selects one photo, ⌘/Ctrl-click adds or removes one, ⇧-click selects a range, ⌘A / Ctrl+A selects all. The photo with the blue outline is the one open in the editor.
+
+## Edits, presets, undo
+
+- Applying a preset changes only the keys it contains, as in Lightroom: two presets in a row add up.
+- **Amount** (0–200%) appears at the top of the panels after a preset is applied. Every numeric setting moves between the settings before the preset and those with it ([`blend.rs`](../crates/app/src/blend.rs)): sliders, curve points (blended as curves), HSL, colour grading (hues along the shorter arc), grain, white balance (in mired, starting from the camera's when the preset sets an absolute one). The profile follows through its own amount; RGB tables cannot be scaled and come with the preset as soon as the amount is above zero. Values are clamped to the slider ranges. Changing another setting ends the Amount control, as does reopening the photo: the sidecar stores the resulting values.
+- **Copy / paste settings** copies everything the open photo has (develop settings, profile, LUT) and pastes it on the open photo or on every selected one.
+- Undo/redo by snapshots: a gesture (a drag, a typed value, a preset, a change of Amount, a paste) is one step. Each photo keeps its history while the app is open.
+
+## Saving
+
+Edits are saved automatically, one second after the last change, when switching photo and when quitting; ⌘S / Ctrl+S saves at once. Photos that were never edited get no file.
+
+- RAW files: `name.xmp` next to the photo, Lightroom's sidecar, with the `crs:` settings, the profile and tables copied from the preset.
+- JPEG/PNG/TIFF: `name.jpg.xmp` (the extension kept, so a RAW and a JPEG with the same name do not share a file). Lightroom stores their settings inside the image, which Lumen never modifies; it ignores these sidecars.
+- Existing sidecars are updated in place, keeping other namespaces and unknown keys. The LUT path and amount go in Lumen's own namespace ([xmp-format.md](xmp-format.md#7-sidecars-written-by-lumen)).
+
+Photos edited in a batch (preset or paste on a selection) are saved immediately.
 
 ## Rendering
 
-- Un **worker thread** decodifica la foto a metà risoluzione (`DecodeOptions { half_size: true }`), la riduce a 2048 px e la sviluppa. Le richieste passano per una casella da un posto: una richiesta non ancora iniziata viene sostituita dalla successiva, quindi conta solo l'ultimo valore dello slider.
-- Durante un trascinamento si sviluppa una **bozza a 1024 px**; al rilascio parte l'anteprima a 2048 px. I raggi di nitidezza e riduzione rumore sono scalati sulla dimensione piena (`RenderOptions::full_size`), così l'anteprima somiglia all'export.
-- Quando la vista mostra più pixel dell'anteprima (100%, 200%) il worker decodifica la foto intera e la sviluppa a piena risoluzione dopo l'anteprima.
-- I profili Adobe installati (vedi [pipeline.md](pipeline.md#profili-adobe-installati)) si preparano una volta per profilo e restano in cache.
-- Tempi misurati sul RW2 della GX80 (Apple Silicon, release, con la macchina carica di altri processi, quindi per eccesso): decodifica half-size 60–120 ms; anteprima a 2048 px 130–300 ms senza preset e 200–400 ms con "Dreamy days in spring" (Texture/Clarity/Dehaze, sharpening e grana sono le fasi spaziali più care); bozza a 1024 px durante il trascinamento ~60 ms in un benchmark isolato della pipeline, ma 280–320 ms nell'app nelle stesse condizioni di carico. L'obiettivo di 100 ms per aggiornamento va **rimisurato a macchina scarica**. Il primo render con un profilo Adobe nuovo legge i file dell'installazione e può richiedere qualche secondo; poi resta in cache. Con lo script attivo (vedi sotto) ogni render stampa il suo tempo su stderr.
+- A **worker thread** decodes the photo at half resolution (`DecodeOptions { half_size: true }`), reduces it to 2048 px and develops it. Requests go through a one-slot mailbox: a request that has not started is replaced by the next one, so only the latest slider value is rendered.
+- While a slider is dragged a **1024 px draft** is developed; the 2048 px preview follows on release. Sharpening and noise reduction radii are scaled from the full size (`RenderOptions::full_size`), so the preview looks like the export.
+- When the view shows more pixels than the preview (100%, 200%) the worker decodes the whole photo and develops it at full resolution after the preview.
+- Installed Adobe profiles (see [pipeline.md](pipeline.md#installed-adobe-profiles)) are prepared once per profile and cached.
+- Timings on the GX80 RW2 (Apple Silicon, release), measured while the machine was busy with other work and therefore pessimistic: half-size decode 60–120 ms; 2048 px preview 130–300 ms without a preset and 200–400 ms with "Dreamy days in spring" (Texture/Clarity/Dehaze, sharpening and grain are the costly spatial stages); 1024 px draft about 60 ms in an isolated pipeline benchmark. The first render with a new Adobe profile reads the installation's files and can take a second or more; it is cached afterwards.
 
 ## Export
 
-Dialog con dimensioni (originale, lato lungo, percentuale, riquadro), formato JPEG (qualità) / PNG 16 bit / TIFF 16 bit, nitidezza output, template del nome (`{name}`, `{preset}`, `{size}`) e cartella (quella della foto se non scelta). L'export decodifica e sviluppa la foto a piena risoluzione in un thread separato con [`export`](../crates/export) (Lanczos3, profilo ICC sRGB, EXIF); la barra di stato mostra l'esito. Le impostazioni del dialog, la cartella delle foto e quella dei preset vengono ricordate.
+Dialog with size (original, long edge, percentage, box), format JPEG (quality) / 16-bit PNG / 16-bit TIFF, output sharpening, file name template (`{name}`, `{preset}`, `{size}`) and folder (the photo's own when none is chosen). With several photos selected it exports all of them. A background thread decodes and develops each photo at full resolution with [`export`](../crates/export) (Lanczos3, sRGB ICC profile, EXIF); the status bar shows the progress. The dialog's settings, the photo folder and the preset folder are remembered.
 
-## Esecuzioni scriptate
+## Scripted runs
 
-Per verificare l'interfaccia senza cliccare (e rifare gli screenshot della documentazione) la variabile `LUMEN_SCRIPT` esegue una sequenza di passi separati da `;` o a capo; l'elenco è in [`script.rs`](../crates/app/src/script.rs). Esempio:
+To check the interface without clicking (and to remake the documentation's screenshots), `LUMEN_SCRIPT` runs a sequence of steps separated by `;` or new lines; the list is in [`script.rs`](../crates/app/src/script.rs). Example:
 
 ```bash
-LUMEN_SCRIPT="wait; preset Dreamy; wait; drag Exposure2012 0 1 12; wait; shot dopo.png; undo; before on; wait; shot prima.png; quit" \
-  cargo run --release -p app -- samples/pixls/P1010041.RW2 --presets samples
+LUMEN_SCRIPT="wait; preset Dreamy; wait; amount 50; wait; shot amount.png; select all; copy; paste; exportdir /tmp/out; export; wait; quit" \
+  cargo run --release -p app -- samples/pixls --presets samples
 ```
 
-Con lo script attivo l'app scrive su stderr il tempo di ogni render.
+With a script running the app prints the time of each render and each exported file on stderr (not visible in Windows release builds, which have no console).
 
-## Limiti
+## Limits
 
-- Nessun catalogo: si lavora per cartella, e le modifiche non salvate con ⌘S si perdono alla chiusura.
-- Le miniature dei RAW usano la preview incorporata senza applicare l'orientamento EXIF.
-- Mancano ritaglio, correzione lenti, maschere e i pannelli Ottica/Geometria.
+- No catalogue: the app works on folders; edits live in the sidecars.
+- RAW thumbnails come from the preview embedded in the file: they ignore the EXIF orientation and do not show the edits.
+- No crop, lens correction, masks, Optics/Geometry panels.

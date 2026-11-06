@@ -11,6 +11,7 @@ use pipeline::adobe::{self, AdobeProfiles};
 use pipeline::{Pipeline, RenderOptions, SourceKind};
 use raw::{DecodeOptions, Photo};
 
+use crate::i18n::{tr, trf};
 use crate::state::Edit;
 use crate::theme;
 
@@ -162,25 +163,27 @@ pub enum DialogResult {
     Cancel,
 }
 
-/// The dialog body. `full` is the photo's full-size dimensions.
-pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2], preset: Option<&str>) -> DialogResult {
+/// The dialog body. `photo` and `full` (its full-size dimensions) show an
+/// example output; `count` photos will be exported.
+pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2], preset: Option<&str>, count: usize) -> DialogResult {
     let mut result = DialogResult::None;
-    ui.label(RichText::new("Esporta").strong().size(16.0));
+    let title = if count > 1 { trf!("Export {count} photos", "Esporta {count} foto") } else { tr("Export", "Esporta").to_string() };
+    ui.label(RichText::new(title).strong().size(16.0));
     ui.add_space(6.0);
     egui::Grid::new("export-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label("Dimensioni");
+        ui.label(tr("Size", "Dimensioni"));
         ui.vertical(|ui| {
-            ui.radio_value(&mut s.size_mode, SizeMode::Original, "Originale");
+            ui.radio_value(&mut s.size_mode, SizeMode::Original, tr("Original", "Originale"));
             ui.horizontal(|ui| {
-                ui.radio_value(&mut s.size_mode, SizeMode::LongEdge, "Lato lungo");
+                ui.radio_value(&mut s.size_mode, SizeMode::LongEdge, tr("Long edge", "Lato lungo"));
                 ui.add_enabled(s.size_mode == SizeMode::LongEdge, egui::DragValue::new(&mut s.long_edge).range(16..=20000).suffix(" px"));
             });
             ui.horizontal(|ui| {
-                ui.radio_value(&mut s.size_mode, SizeMode::Percent, "Percentuale");
+                ui.radio_value(&mut s.size_mode, SizeMode::Percent, tr("Percentage", "Percentuale"));
                 ui.add_enabled(s.size_mode == SizeMode::Percent, egui::DragValue::new(&mut s.percent).range(1.0..=100.0).suffix(" %"));
             });
             ui.horizontal(|ui| {
-                ui.radio_value(&mut s.size_mode, SizeMode::Fit, "Riquadro");
+                ui.radio_value(&mut s.size_mode, SizeMode::Fit, tr("Fit in box", "Riquadro"));
                 ui.add_enabled_ui(s.size_mode == SizeMode::Fit, |ui| {
                     ui.add(egui::DragValue::new(&mut s.fit[0]).range(16..=20000));
                     ui.label("×");
@@ -190,7 +193,7 @@ pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2
         });
         ui.end_row();
 
-        ui.label("Formato");
+        ui.label(tr("Format", "Formato"));
         ui.horizontal(|ui| {
             ui.selectable_value(&mut s.format, FileFormat::Jpeg, "JPEG");
             ui.selectable_value(&mut s.format, FileFormat::Png, "PNG 16 bit");
@@ -199,34 +202,36 @@ pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2
         ui.end_row();
 
         if s.format == FileFormat::Jpeg {
-            ui.label("Qualità");
+            ui.label(tr("Quality", "Qualità"));
             ui.add(egui::Slider::new(&mut s.quality, 1..=100));
             ui.end_row();
         }
 
-        ui.label("Nitidezza output");
-        ui.add(egui::Slider::new(&mut s.sharpen, 0.0..=100.0).fixed_decimals(0)).on_hover_text("Nitidezza per lo schermo, dopo il ridimensionamento (0 = nessuna)");
+        ui.label(tr("Output sharpening", "Nitidezza output"));
+        ui.add(egui::Slider::new(&mut s.sharpen, 0.0..=100.0).fixed_decimals(0)).on_hover_text(tr("Sharpening for screen, after resizing (0 = none)", "Nitidezza per lo schermo, dopo il ridimensionamento (0 = nessuna)"));
         ui.end_row();
 
-        ui.label("Nome file");
+        ui.label(tr("File name", "Nome file"));
         ui.vertical(|ui| {
             ui.add(egui::TextEdit::singleline(&mut s.template).desired_width(240.0));
-            ui.label(RichText::new("{name} nome della foto · {preset} · {size} lato lungo").color(theme::TEXT_DIM).size(11.0));
+            ui.label(RichText::new(tr("{name} photo name · {preset} · {size} long edge", "{name} nome della foto · {preset} · {size} lato lungo")).color(theme::TEXT_DIM).size(11.0));
         });
         ui.end_row();
 
-        ui.label("Cartella");
+        ui.label(tr("Folder", "Cartella"));
         ui.horizontal(|ui| {
-            let shown = s.folder.as_ref().map_or("quella della foto".to_string(), |f| f.display().to_string());
-            ui.label(RichText::new(shown).monospace().size(11.5));
-            if ui.small_button("Scegli…").clicked() {
-                if let Some(dir) = rfd::FileDialog::new().set_title("Cartella di destinazione").pick_folder() {
+            // Buttons first: the path takes the room left and is shortened.
+            if ui.small_button(tr("Choose…", "Scegli…")).clicked() {
+                if let Some(dir) = rfd::FileDialog::new().set_title(tr("Destination folder", "Cartella di destinazione")).pick_folder() {
                     s.folder = Some(dir);
                 }
             }
-            if s.folder.is_some() && ui.small_button("×").on_hover_text("Usa la cartella della foto").clicked() {
+            if s.folder.is_some() && ui.small_button("×").on_hover_text(tr("Use the photo's folder", "Usa la cartella della foto")).clicked() {
                 s.folder = None;
             }
+            let shown = s.folder.as_ref().map_or(tr("the photo's own", "quella della foto").to_string(), |f| f.display().to_string());
+            let text = RichText::new(shown).monospace().size(11.5);
+            ui.add(egui::Label::new(text.clone()).truncate()).on_hover_text(text);
         });
         ui.end_row();
     });
@@ -234,16 +239,19 @@ pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2
     ui.add_space(8.0);
     let (w, h) = s.size().dimensions(full[0], full[1]);
     let out = s.output_path(photo, full, preset);
-    ui.label(RichText::new(format!("{} — {w} × {h} px", out.display())).color(theme::TEXT_DIM).size(11.5));
+    ui.add(egui::Label::new(RichText::new(format!("{} — {w} × {h} px", out.display())).color(theme::TEXT_DIM).size(11.5)).truncate());
+    if count > 1 {
+        ui.label(RichText::new(trf!("and {} more photos with the same name template", "e altre {} foto con lo stesso modello di nome", count - 1)).color(theme::TEXT_DIM).size(11.5));
+    }
     if out.exists() {
-        ui.label(RichText::new("Il file esiste già e verrà sovrascritto").color(ui.visuals().warn_fg_color).size(11.5));
+        ui.label(RichText::new(tr("The file exists and will be overwritten", "Il file esiste già e verrà sovrascritto")).color(ui.visuals().warn_fg_color).size(11.5));
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if ui.button(RichText::new("Esporta").strong()).clicked() {
+        if ui.button(RichText::new(tr("Export", "Esporta")).strong()).clicked() {
             result = DialogResult::Export;
         }
-        if ui.button("Annulla").clicked() {
+        if ui.button(tr("Cancel", "Annulla")).clicked() {
             result = DialogResult::Cancel;
         }
     });
@@ -251,27 +259,53 @@ pub fn dialog(ui: &mut Ui, s: &mut ExportSettings, photo: &Path, full: [usize; 2
 }
 
 pub enum ExportEvent {
-    Done { path: PathBuf, size: [usize; 2], ms: u128 },
-    Failed { path: PathBuf, error: String },
+    /// Photo `index` (of `total`) is being developed.
+    Started { index: usize, total: usize, photo: PathBuf },
+    Done { path: PathBuf, size: [usize; 2] },
+    Failed { photo: PathBuf, error: String },
+    Finished { written: usize, failed: usize, ms: u128 },
 }
 
-/// Develops `photo` at full resolution and writes it, on its own thread.
-pub fn spawn_export(photo: PathBuf, edit: Edit, out: PathBuf, opts: ExportOptions, adobe: AdobeProfiles, tx: Sender<ExportEvent>, ctx: egui::Context) {
+/// One photo to export, with its edit.
+pub struct ExportJob {
+    pub photo: PathBuf,
+    pub edit: Edit,
+}
+
+/// Develops the photos one after the other at full resolution and writes
+/// them, on a thread of its own, reporting progress.
+pub fn spawn_export(jobs: Vec<ExportJob>, settings: ExportSettings, adobe: AdobeProfiles, tx: Sender<ExportEvent>, ctx: egui::Context) {
     std::thread::Builder::new()
         .name("export".into())
         .spawn(move || {
             let t = Instant::now();
-            let event = match run_export(&photo, &edit, &out, &opts, &adobe) {
-                Ok(size) => ExportEvent::Done { path: out, size, ms: t.elapsed().as_millis() },
-                Err(error) => ExportEvent::Failed { path: out, error },
+            let (mut written, mut failed) = (0, 0);
+            let total = jobs.len();
+            let send = |e| {
+                tx.send(e).ok();
+                ctx.request_repaint();
             };
-            tx.send(event).ok();
-            ctx.request_repaint();
+            for (index, job) in jobs.into_iter().enumerate() {
+                send(ExportEvent::Started { index, total, photo: job.photo.clone() });
+                match run_export(&job.photo, &job.edit, &settings, &adobe) {
+                    Ok((path, size)) => {
+                        written += 1;
+                        send(ExportEvent::Done { path, size });
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        send(ExportEvent::Failed { photo: job.photo, error });
+                    }
+                }
+            }
+            send(ExportEvent::Finished { written, failed, ms: t.elapsed().as_millis() });
         })
         .expect("spawn export thread");
 }
 
-pub fn run_export(photo: &Path, edit: &Edit, out: &Path, opts: &ExportOptions, adobe: &AdobeProfiles) -> Result<[usize; 2], String> {
+/// Exports one photo; the file name comes from the template, once the
+/// photo's size is known. Returns the path written and its size.
+pub fn run_export(photo: &Path, edit: &Edit, s: &ExportSettings, adobe: &AdobeProfiles) -> Result<(PathBuf, [usize; 2]), String> {
     let mut img = Photo::load(photo, &DecodeOptions::default()).map_err(|e| e.to_string())?;
     let mut settings = edit.settings.clone();
     adobe::prepare(adobe, &mut img, &mut settings);
@@ -279,13 +313,15 @@ pub fn run_export(photo: &Path, edit: &Edit, out: &Path, opts: &ExportOptions, a
     if let Some(l) = &edit.lut {
         pipeline = pipeline.with_cube((*l.cube).clone(), edit.lut_amount / 100.0);
     }
+    let out = s.output_path(photo, [img.data.width, img.data.height], edit.preset_name.as_deref());
+    let opts = ExportOptions { size: s.size(), format: s.format(), sharpen: s.sharpen };
     let rendered = pipeline.render(&img, &RenderOptions::default());
-    let finished = export::finish(&rendered, &pipeline, opts);
+    let finished = export::finish(&rendered, &pipeline, &opts);
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    export::save(&finished, &img.info, opts.format, out).map_err(|e| e.to_string())?;
-    Ok([finished.width, finished.height])
+    export::save(&finished, &img.info, opts.format, &out).map_err(|e| e.to_string())?;
+    Ok((out, [finished.width, finished.height]))
 }
 
 #[cfg(test)]
@@ -331,12 +367,20 @@ mod tests {
         let preset = xmp::Preset::load(root.join("samples/Dreamy days in spring.xmp")).unwrap();
         let mut edit = Edit::defaults(SourceKind::Raw);
         edit.apply_preset(&preset, "Dreamy").unwrap();
-        let out = std::env::temp_dir().join(format!("lumen-app-export-{}.jpg", std::process::id()));
-        let opts = ExportOptions { size: Size::LongEdge(800), format: Format::Jpeg { quality: 90 }, sharpen: 20.0 };
-        let size = run_export(&photo, &edit, &out, &opts, &AdobeProfiles::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("lumen-app-export-{}", std::process::id()));
+        let settings = ExportSettings {
+            long_edge: 800,
+            quality: 90,
+            sharpen: 20.0,
+            template: "{name}-{preset}-{size}".into(),
+            folder: Some(dir.clone()),
+            ..Default::default()
+        };
+        let (out, size) = run_export(&photo, &edit, &settings, &AdobeProfiles::default()).unwrap();
+        assert_eq!(out, dir.join("P1010041-Dreamy-800.jpg"));
         assert_eq!(size[0].max(size[1]), 800);
         let back = image::open(&out).unwrap();
         assert_eq!((back.width() as usize, back.height() as usize), (size[0], size[1]));
-        std::fs::remove_file(out).ok();
+        std::fs::remove_dir_all(dir).ok();
     }
 }

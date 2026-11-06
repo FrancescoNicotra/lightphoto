@@ -6,6 +6,7 @@ use pipeline::tone::{self, Lut1};
 use pipeline::SourceKind;
 use xmp::{Curve, WhiteBalance, Wheel, NS_CRS};
 
+use crate::i18n::{tr, trf};
 use crate::state::Edit;
 use crate::theme;
 use crate::widgets::{color_wheel, curve_editor, hue_color, Mapping, Slider};
@@ -17,6 +18,8 @@ pub struct PanelInput<'a> {
     /// White balance in effect for raw files (temperature, tint).
     pub white_balance: Option<(f32, f32)>,
     pub histogram: Option<&'a Histogram>,
+    /// The camera's white balance, for the preset amount.
+    pub as_shot: Option<(f32, f32)>,
 }
 
 /// Panel choices that are not part of the edit.
@@ -34,22 +37,25 @@ pub enum PanelAction {
     ResetAll,
 }
 
-const BANDS: [(&str, f32); 8] = [
-    ("Rosso", 0.0),
-    ("Arancione", 30.0),
-    ("Giallo", 60.0),
-    ("Verde", 120.0),
-    ("Acqua", 180.0),
-    ("Blu", 235.0),
-    ("Viola", 270.0),
-    ("Magenta", 310.0),
+/// HSL bands: English and Italian name, centre hue.
+const BANDS: [(&str, &str, f32); 8] = [
+    ("Red", "Rosso", 0.0),
+    ("Orange", "Arancione", 30.0),
+    ("Yellow", "Giallo", 60.0),
+    ("Green", "Verde", 120.0),
+    ("Aqua", "Acqua", 180.0),
+    ("Blue", "Blu", 235.0),
+    ("Purple", "Viola", 270.0),
+    ("Magenta", "Magenta", 310.0),
 ];
 
-fn section(ui: &mut Ui, title: &str, open: bool, force: Option<&str>, add: impl FnOnce(&mut Ui)) {
+/// A collapsible panel. `key` is its stable name (ids, scripts), `title`
+/// what is shown.
+fn section(ui: &mut Ui, key: &str, title: &str, open: bool, force: Option<&str>, add: impl FnOnce(&mut Ui)) {
     egui::CollapsingHeader::new(RichText::new(title).strong().size(13.5))
-        .id_salt(title)
+        .id_salt(key)
         .default_open(open)
-        .open(force.map(|f| title.starts_with(f)))
+        .open(force.map(|f| f == key))
         .show(ui, |ui| {
             ui.add_space(2.0);
             add(ui);
@@ -75,26 +81,46 @@ fn tabs(ui: &mut Ui, current: &mut usize, names: &[&str]) {
 pub fn develop_panels(ui: &mut Ui, edit: &mut Edit, input: &PanelInput, st: &mut PanelState) -> Vec<PanelAction> {
     let mut actions = Vec::new();
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Sviluppo").strong().size(15.0));
+        ui.label(RichText::new(tr("Develop", "Sviluppo")).strong().size(15.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Reimposta").on_hover_text("Riporta tutte le impostazioni ai valori predefiniti").clicked() {
+            if ui.button(tr("Reset", "Reimposta")).on_hover_text(tr("Reset every setting to its default", "Riporta tutte le impostazioni ai valori predefiniti")).clicked() {
                 actions.push(PanelAction::ResetAll);
             }
         });
     });
     ui.separator();
 
+    preset_amount(ui, edit, input);
     let force = st.force_open.take();
     let f = force.as_deref();
-    section(ui, "Profilo e LUT", true, f, |ui| profile(ui, edit, &mut actions));
-    section(ui, "Base", true, f, |ui| basic(ui, edit, input));
-    section(ui, "Curva di viraggio", false, f, |ui| curve(ui, edit, input, &mut st.curve_tab));
-    section(ui, "HSL / Colore", false, f, |ui| hsl(ui, edit, &mut st.hsl_tab));
-    section(ui, "Color grading", false, f, |ui| grading(ui, edit, &mut st.grading_tab));
-    section(ui, "Dettaglio", false, f, |ui| detail(ui, edit));
-    section(ui, "Effetti", false, f, |ui| effects(ui, edit));
-    section(ui, "Calibrazione", false, f, |ui| calibration(ui, edit));
+    section(ui, "profile", tr("Profile & LUT", "Profilo e LUT"), true, f, |ui| profile(ui, edit, &mut actions));
+    section(ui, "basic", tr("Basic", "Base"), true, f, |ui| basic(ui, edit, input));
+    section(ui, "curve", tr("Tone curve", "Curva di viraggio"), false, f, |ui| curve(ui, edit, input, &mut st.curve_tab));
+    section(ui, "hsl", tr("HSL / Color", "HSL / Colore"), false, f, |ui| hsl(ui, edit, &mut st.hsl_tab));
+    section(ui, "grading", "Color grading", false, f, |ui| grading(ui, edit, &mut st.grading_tab));
+    section(ui, "detail", tr("Detail", "Dettaglio"), false, f, |ui| detail(ui, edit));
+    section(ui, "effects", tr("Effects", "Effetti"), false, f, |ui| effects(ui, edit));
+    section(ui, "calibration", tr("Calibration", "Calibrazione"), false, f, |ui| calibration(ui, edit));
     actions
+}
+
+/// Strength of the preset just applied, while it can still be changed.
+fn preset_amount(ui: &mut Ui, edit: &mut Edit, input: &PanelInput) {
+    let Some(p) = &edit.preset else { return };
+    let mut amount = p.amount;
+    let name = p.name.clone();
+    egui::Frame::new().fill(theme::PANEL_DARK).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Preset").color(theme::TEXT_DIM));
+            ui.label(RichText::new(&name).strong());
+        });
+        let r = Slider::new(tr("Amount", "Quantità"), 0.0..=200.0, 100.0).suffix("%").show(ui, &mut amount);
+        if r.changed() {
+            edit.set_preset_amount(amount, input.as_shot);
+        }
+        r.on_hover_text(tr("Strength of the preset: 0% = as before the preset, 100% = as the preset. Available until another setting is changed", "Intensità del preset: 0% = prima del preset, 100% = come il preset. Resta finché non si modifica altro"));
+    });
+    ui.add_space(4.0);
 }
 
 fn profile(ui: &mut Ui, edit: &mut Edit, actions: &mut Vec<PanelAction>) {
@@ -103,22 +129,22 @@ fn profile(ui: &mut Ui, edit: &mut Edit, actions: &mut Vec<PanelAction>) {
     match &mut s.look {
         Some(look) => {
             ui.horizontal(|ui| {
-                ui.label("Profilo");
+                ui.label(tr("Profile", "Profilo"));
                 ui.label(RichText::new(&look.name).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    remove_look = ui.small_button("×").on_hover_text("Torna al profilo predefinito").clicked();
+                    remove_look = ui.small_button("×").on_hover_text(tr("Back to the default profile", "Torna al profilo predefinito")).clicked();
                 });
             });
             let mut amount = look.amount * 100.0;
-            if Slider::new("Fattore", 0.0..=200.0, 100.0).suffix("%").show(ui, &mut amount).changed() {
+            if Slider::new(tr("Amount", "Fattore"), 0.0..=200.0, 100.0).suffix("%").show(ui, &mut amount).changed() {
                 look.amount = amount / 100.0;
             }
         }
         None => {
             ui.horizontal(|ui| {
-                ui.label("Profilo");
-                ui.label(RichText::new("Predefinito").color(theme::TEXT_DIM))
-                    .on_hover_text("Adobe Standard se Lightroom è installato, altrimenti le matrici del file e la curva ACR3");
+                ui.label(tr("Profile", "Profilo"));
+                ui.label(RichText::new(tr("Default", "Predefinito")).color(theme::TEXT_DIM))
+                    .on_hover_text(tr("Adobe Standard when Lightroom is installed, otherwise the file's own matrices and the ACR3 curve", "Adobe Standard se Lightroom è installato, altrimenti le matrici del file e la curva ACR3"));
             });
         }
     }
@@ -136,20 +162,20 @@ fn profile(ui: &mut Ui, edit: &mut Edit, actions: &mut Vec<PanelAction>) {
                 ui.label(RichText::new(&l.name).strong()).on_hover_text(l.path.display().to_string());
             }
             None => {
-                ui.label(RichText::new("nessuna").color(theme::TEXT_DIM));
+                ui.label(RichText::new(tr("none", "nessuna")).color(theme::TEXT_DIM));
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if edit.lut.is_some() {
-                remove_lut = ui.small_button("×").on_hover_text("Rimuovi la LUT").clicked();
+                remove_lut = ui.small_button("×").on_hover_text(tr("Remove the LUT", "Rimuovi la LUT")).clicked();
             }
-            if ui.small_button("Carica…").on_hover_text("Carica una LUT .cube o .3dl").clicked() {
+            if ui.small_button(tr("Load…", "Carica…")).on_hover_text(tr("Load a .cube or .3dl LUT", "Carica una LUT .cube o .3dl")).clicked() {
                 actions.push(PanelAction::LoadLut);
             }
         });
     });
     if edit.lut.is_some() {
-        Slider::new("Fattore LUT", 0.0..=100.0, 100.0).suffix("%").show(ui, &mut edit.lut_amount);
+        Slider::new(tr("LUT amount", "Fattore LUT"), 0.0..=100.0, 100.0).suffix("%").show(ui, &mut edit.lut_amount);
     }
     if remove_lut {
         edit.lut = None;
@@ -163,19 +189,19 @@ fn basic(ui: &mut Ui, edit: &mut Edit, input: &PanelInput) {
     let s = &mut edit.settings;
     if input.kind == SourceKind::Raw {
         let names: [(&str, WhiteBalance); 9] = [
-            ("Come scattato", WhiteBalance::AsShot),
-            ("Automatico", WhiteBalance::Auto),
-            ("Luce diurna", WhiteBalance::Preset("Daylight".into())),
-            ("Nuvoloso", WhiteBalance::Preset("Cloudy".into())),
-            ("Ombra", WhiteBalance::Preset("Shade".into())),
-            ("Tungsteno", WhiteBalance::Preset("Tungsten".into())),
-            ("Fluorescente", WhiteBalance::Preset("Fluorescent".into())),
+            (tr("As Shot", "Come scattato"), WhiteBalance::AsShot),
+            (tr("Auto", "Automatico"), WhiteBalance::Auto),
+            (tr("Daylight", "Luce diurna"), WhiteBalance::Preset("Daylight".into())),
+            (tr("Cloudy", "Nuvoloso"), WhiteBalance::Preset("Cloudy".into())),
+            (tr("Shade", "Ombra"), WhiteBalance::Preset("Shade".into())),
+            (tr("Tungsten", "Tungsteno"), WhiteBalance::Preset("Tungsten".into())),
+            (tr("Fluorescent", "Fluorescente"), WhiteBalance::Preset("Fluorescent".into())),
             ("Flash", WhiteBalance::Preset("Flash".into())),
-            ("Personalizzato", WhiteBalance::Custom),
+            (tr("Custom", "Personalizzato"), WhiteBalance::Custom),
         ];
-        let current = names.iter().find(|(_, wb)| *wb == s.white_balance).map_or("Personalizzato", |(n, _)| n);
+        let current = names.iter().find(|(_, wb)| *wb == s.white_balance).map_or(tr("Custom", "Personalizzato"), |(n, _)| n);
         ui.horizontal(|ui| {
-            ui.label("Bil. bianco");
+            ui.label(tr("White balance", "Bil. bianco"));
             egui::ComboBox::from_id_salt("wb").selected_text(current).show_ui(ui, |ui| {
                 for (name, wb) in names {
                     ui.selectable_value(&mut s.white_balance, wb, name);
@@ -191,7 +217,7 @@ fn basic(ui: &mut Ui, edit: &mut Edit, input: &PanelInput) {
             .colors(&TEMP_COLORS)
             .suffix(" K")
             .show(ui, &mut t);
-        let rn = Slider::new("Tinta", -150.0..=150.0, eff_tint.round()).colors(&TINT_COLORS).show(ui, &mut tint);
+        let rn = Slider::new(tr("Tint", "Tinta"), -150.0..=150.0, eff_tint.round()).colors(&TINT_COLORS).show(ui, &mut tint);
         if rt.changed() || rn.changed() {
             s.white_balance = WhiteBalance::Custom;
             s.temperature = Some(t);
@@ -205,30 +231,30 @@ fn basic(ui: &mut Ui, edit: &mut Edit, input: &PanelInput) {
         }
     } else {
         Slider::new("Temp.", -100.0..=100.0, 0.0).colors(&TEMP_COLORS).show(ui, &mut s.incremental_temperature);
-        Slider::new("Tinta", -100.0..=100.0, 0.0).colors(&TINT_COLORS).show(ui, &mut s.incremental_tint);
+        Slider::new(tr("Tint", "Tinta"), -100.0..=100.0, 0.0).colors(&TINT_COLORS).show(ui, &mut s.incremental_tint);
     }
 
-    subheading(ui, "Tono");
+    subheading(ui, tr("Tone", "Tono"));
     let b = &mut s.basic;
-    Slider::new("Esposizione", -5.0..=5.0, 0.0).decimals(2).show(ui, &mut b.exposure);
-    Slider::new("Contrasto", -100.0..=100.0, 0.0).show(ui, &mut b.contrast);
-    Slider::new("Luci", -100.0..=100.0, 0.0).show(ui, &mut b.highlights);
-    Slider::new("Ombre", -100.0..=100.0, 0.0).show(ui, &mut b.shadows);
-    Slider::new("Bianchi", -100.0..=100.0, 0.0).show(ui, &mut b.whites);
-    Slider::new("Neri", -100.0..=100.0, 0.0).show(ui, &mut b.blacks);
+    Slider::new(tr("Exposure", "Esposizione"), -5.0..=5.0, 0.0).decimals(2).show(ui, &mut b.exposure);
+    Slider::new(tr("Contrast", "Contrasto"), -100.0..=100.0, 0.0).show(ui, &mut b.contrast);
+    Slider::new(tr("Highlights", "Luci"), -100.0..=100.0, 0.0).show(ui, &mut b.highlights);
+    Slider::new(tr("Shadows", "Ombre"), -100.0..=100.0, 0.0).show(ui, &mut b.shadows);
+    Slider::new(tr("Whites", "Bianchi"), -100.0..=100.0, 0.0).show(ui, &mut b.whites);
+    Slider::new(tr("Blacks", "Neri"), -100.0..=100.0, 0.0).show(ui, &mut b.blacks);
 
-    subheading(ui, "Presenza");
+    subheading(ui, tr("Presence", "Presenza"));
     let p = &mut s.presence;
     Slider::new("Texture", -100.0..=100.0, 0.0).show(ui, &mut p.texture);
-    Slider::new("Chiarezza", -100.0..=100.0, 0.0).show(ui, &mut p.clarity);
-    Slider::new("Foschia", -100.0..=100.0, 0.0).show(ui, &mut p.dehaze);
+    Slider::new(tr("Clarity", "Chiarezza"), -100.0..=100.0, 0.0).show(ui, &mut p.clarity);
+    Slider::new(tr("Dehaze", "Foschia"), -100.0..=100.0, 0.0).show(ui, &mut p.dehaze);
     let sat_colors = [Color32::from_gray(128), Color32::from_rgb(220, 60, 160)];
-    Slider::new("Vividezza", -100.0..=100.0, 0.0).colors(&sat_colors).show(ui, &mut p.vibrance);
-    Slider::new("Saturazione", -100.0..=100.0, 0.0).colors(&sat_colors).show(ui, &mut p.saturation);
+    Slider::new(tr("Vibrance", "Vividezza"), -100.0..=100.0, 0.0).colors(&sat_colors).show(ui, &mut p.vibrance);
+    Slider::new(tr("Saturation", "Saturazione"), -100.0..=100.0, 0.0).colors(&sat_colors).show(ui, &mut p.saturation);
 }
 
 fn curve(ui: &mut Ui, edit: &mut Edit, input: &PanelInput, tab: &mut usize) {
-    tabs(ui, tab, &["Parametrica", "Punti", "R", "G", "B"]);
+    tabs(ui, tab, &[tr("Parametric", "Parametrica"), tr("Point", "Punti"), "R", "G", "B"]);
     let s = &mut edit.settings;
     let parametric = tone::parametric(&s.parametric);
     let luma_hist = input.histogram.map(|h| {
@@ -245,16 +271,16 @@ fn curve(ui: &mut Ui, edit: &mut Edit, input: &PanelInput, tab: &mut usize) {
             let mut shown = s.curves.master.clone();
             curve_view(ui, &mut shown, &parametric, luma_hist.as_ref());
             let p = &mut s.parametric;
-            Slider::new("Luci", -100.0..=100.0, 0.0).show(ui, &mut p.highlights);
-            Slider::new("Chiari", -100.0..=100.0, 0.0).show(ui, &mut p.lights);
-            Slider::new("Scuri", -100.0..=100.0, 0.0).show(ui, &mut p.darks);
-            Slider::new("Ombre", -100.0..=100.0, 0.0).show(ui, &mut p.shadows);
-            subheading(ui, "Divisioni");
+            Slider::new(tr("Highlights", "Luci"), -100.0..=100.0, 0.0).show(ui, &mut p.highlights);
+            Slider::new(tr("Lights", "Chiari"), -100.0..=100.0, 0.0).show(ui, &mut p.lights);
+            Slider::new(tr("Darks", "Scuri"), -100.0..=100.0, 0.0).show(ui, &mut p.darks);
+            Slider::new(tr("Shadows", "Ombre"), -100.0..=100.0, 0.0).show(ui, &mut p.shadows);
+            subheading(ui, tr("Splits", "Divisioni"));
             let (a, b, c) = (p.shadow_split, p.midtone_split, p.highlight_split);
             ui.push_id("splits", |ui| {
-                Slider::new("Ombre", 5.0..=(b - 5.0).max(5.0), 25.0).show(ui, &mut p.shadow_split);
-                Slider::new("Mezzitoni", (a + 5.0)..=(c - 5.0).max(a + 5.0), 50.0).show(ui, &mut p.midtone_split);
-                Slider::new("Luci", (b + 5.0).min(95.0)..=95.0, 75.0).show(ui, &mut p.highlight_split);
+                Slider::new(tr("Shadows", "Ombre"), 5.0..=(b - 5.0).max(5.0), 25.0).show(ui, &mut p.shadow_split);
+                Slider::new(tr("Midtones", "Mezzitoni"), (a + 5.0)..=(c - 5.0).max(a + 5.0), 50.0).show(ui, &mut p.midtone_split);
+                Slider::new(tr("Highlights", "Luci"), (b + 5.0).min(95.0)..=95.0, 75.0).show(ui, &mut p.highlight_split);
             });
         }
         1 => {
@@ -286,9 +312,9 @@ fn curve_view(ui: &mut Ui, curve: &mut Curve, base: &Lut1, hist: Option<&[u32; 2
 
 fn curve_footer(ui: &mut Ui, curve: &mut Curve) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Clic: aggiungi · trascina · doppio clic: rimuovi").color(theme::TEXT_DIM).size(11.0));
+        ui.label(RichText::new(tr("Click: add · drag · double-click: remove", "Clic: aggiungi · trascina · doppio clic: rimuovi")).color(theme::TEXT_DIM).size(11.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("Lineare").clicked() {
+            if ui.small_button(tr("Linear", "Lineare")).clicked() {
                 *curve = Curve::default();
             }
         });
@@ -296,7 +322,7 @@ fn curve_footer(ui: &mut Ui, curve: &mut Curve) {
 }
 
 fn hsl(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
-    tabs(ui, tab, &["Tonalità", "Saturazione", "Luminanza"]);
+    tabs(ui, tab, &[tr("Hue", "Tonalità"), tr("Saturation", "Saturazione"), tr("Luminance", "Luminanza")]);
     let h = &mut edit.settings.hsl;
     let values = match *tab {
         0 => &mut h.hue,
@@ -304,7 +330,8 @@ fn hsl(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
         _ => &mut h.luminance,
     };
     ui.push_id(*tab, |ui| {
-        for (i, (name, deg)) in BANDS.iter().enumerate() {
+        for (i, (en, it, deg)) in BANDS.iter().enumerate() {
+            let name = tr(en, it);
             let colors: Vec<Color32> = match *tab {
                 0 => vec![hue_color(deg - 35.0, 0.8), hue_color(*deg, 0.8), hue_color(deg + 35.0, 0.8)],
                 1 => vec![hue_color(*deg, 0.0), hue_color(*deg, 0.9)],
@@ -316,12 +343,12 @@ fn hsl(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
 }
 
 fn grading(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
-    tabs(ui, tab, &["3 vie", "Ombre", "Mezzitoni", "Luci", "Globale"]);
+    tabs(ui, tab, &[tr("3-way", "3 vie"), tr("Shadows", "Ombre"), tr("Midtones", "Mezzitoni"), tr("Highlights", "Luci"), tr("Global", "Globale")]);
     let g = &mut edit.settings.color_grade;
     if *tab == 0 {
         let size = ((ui.available_width() - 16.0) / 3.0).min(96.0);
         ui.columns(3, |cols| {
-            for (col, (name, wheel)) in cols.iter_mut().zip([("Ombre", &mut g.shadow), ("Mezzitoni", &mut g.midtone), ("Luci", &mut g.highlight)]) {
+            for (col, (name, wheel)) in cols.iter_mut().zip([(tr("Shadows", "Ombre"), &mut g.shadow), (tr("Midtones", "Mezzitoni"), &mut g.midtone), (tr("Highlights", "Luci"), &mut g.highlight)]) {
                 col.vertical_centered(|ui| {
                     ui.label(RichText::new(name).size(11.5));
                     ui.push_id(name, |ui| wheel_with_tooltip(ui, wheel, size));
@@ -329,14 +356,14 @@ fn grading(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
             }
         });
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Globale").size(11.5));
+            ui.label(RichText::new(tr("Global", "Globale")).size(11.5));
             ui.push_id("global", |ui| wheel_with_tooltip(ui, &mut g.global, size));
         });
         ui.push_id("lums", |ui| {
-            Slider::new("Lum. ombre", -100.0..=100.0, 0.0).show(ui, &mut g.shadow.lum);
-            Slider::new("Lum. mezzitoni", -100.0..=100.0, 0.0).show(ui, &mut g.midtone.lum);
-            Slider::new("Lum. luci", -100.0..=100.0, 0.0).show(ui, &mut g.highlight.lum);
-            Slider::new("Lum. globale", -100.0..=100.0, 0.0).show(ui, &mut g.global.lum);
+            Slider::new(tr("Shadows lum.", "Lum. ombre"), -100.0..=100.0, 0.0).show(ui, &mut g.shadow.lum);
+            Slider::new(tr("Midtones lum.", "Lum. mezzitoni"), -100.0..=100.0, 0.0).show(ui, &mut g.midtone.lum);
+            Slider::new(tr("Highlights lum.", "Lum. luci"), -100.0..=100.0, 0.0).show(ui, &mut g.highlight.lum);
+            Slider::new(tr("Global lum.", "Lum. globale"), -100.0..=100.0, 0.0).show(ui, &mut g.global.lum);
         });
     } else {
         let wheel = match *tab {
@@ -351,66 +378,69 @@ fn grading(ui: &mut Ui, edit: &mut Edit, tab: &mut usize) {
         });
         ui.push_id(*tab, |ui| {
             let hues: Vec<Color32> = (0..=6).map(|i| hue_color(i as f32 * 60.0, 0.8)).collect();
-            Slider::new("Tonalità", 0.0..=359.0, 0.0).colors(&hues).show(ui, &mut wheel.hue);
+            Slider::new(tr("Hue", "Tonalità"), 0.0..=359.0, 0.0).colors(&hues).show(ui, &mut wheel.hue);
             let sat = [Color32::from_gray(128), hue_color(wheel.hue, 0.9)];
-            Slider::new("Saturazione", 0.0..=100.0, 0.0).colors(&sat).show(ui, &mut wheel.sat);
-            Slider::new("Luminanza", -100.0..=100.0, 0.0).colors(&[Color32::from_gray(20), Color32::from_gray(235)]).show(ui, &mut wheel.lum);
+            Slider::new(tr("Saturation", "Saturazione"), 0.0..=100.0, 0.0).colors(&sat).show(ui, &mut wheel.sat);
+            Slider::new(tr("Luminance", "Luminanza"), -100.0..=100.0, 0.0).colors(&[Color32::from_gray(20), Color32::from_gray(235)]).show(ui, &mut wheel.lum);
         });
     }
     ui.add_space(4.0);
-    Slider::new("Fusione", 0.0..=100.0, 50.0).show(ui, &mut g.blending);
-    Slider::new("Bilanciamento", -100.0..=100.0, 0.0).show(ui, &mut g.balance);
+    Slider::new(tr("Blending", "Fusione"), 0.0..=100.0, 50.0).show(ui, &mut g.blending);
+    Slider::new(tr("Balance", "Bilanciamento"), -100.0..=100.0, 0.0).show(ui, &mut g.balance);
 }
 
 fn wheel_with_tooltip(ui: &mut Ui, w: &mut Wheel, size: f32) {
     let (h, s) = (w.hue, w.sat);
-    color_wheel(ui, &mut w.hue, &mut w.sat, size).on_hover_text(format!("Tonalità {h:.0}° · Saturazione {s:.0}\nDoppio clic per azzerare"));
+    color_wheel(ui, &mut w.hue, &mut w.sat, size).on_hover_text(trf!(
+        "Hue {h:.0}° · Saturation {s:.0}\nDouble-click to reset",
+        "Tonalità {h:.0}° · Saturazione {s:.0}\nDoppio clic per azzerare"
+    ));
 }
 
 fn detail(ui: &mut Ui, edit: &mut Edit) {
     let d = &mut edit.settings.detail;
-    subheading(ui, "Nitidezza");
-    Slider::new("Fattore", 0.0..=150.0, 40.0).show(ui, &mut d.sharpness);
-    Slider::new("Raggio", 0.5..=3.0, 1.0).decimals(1).show(ui, &mut d.sharpen_radius);
-    Slider::new("Dettaglio", 0.0..=100.0, 25.0).show(ui, &mut d.sharpen_detail);
-    Slider::new("Mascheratura", 0.0..=100.0, 0.0).show(ui, &mut d.sharpen_edge_masking);
-    subheading(ui, "Riduzione disturbo");
-    Slider::new("Luminanza", 0.0..=100.0, 0.0)
+    subheading(ui, tr("Sharpening", "Nitidezza"));
+    Slider::new(tr("Amount", "Fattore"), 0.0..=150.0, 40.0).show(ui, &mut d.sharpness);
+    Slider::new(tr("Radius", "Raggio"), 0.5..=3.0, 1.0).decimals(1).show(ui, &mut d.sharpen_radius);
+    Slider::new(tr("Detail", "Dettaglio"), 0.0..=100.0, 25.0).show(ui, &mut d.sharpen_detail);
+    Slider::new(tr("Masking", "Mascheratura"), 0.0..=100.0, 0.0).show(ui, &mut d.sharpen_edge_masking);
+    subheading(ui, tr("Noise reduction", "Riduzione disturbo"));
+    Slider::new(tr("Luminance", "Luminanza"), 0.0..=100.0, 0.0)
         .show(ui, &mut d.luminance_nr)
-        .on_hover_text("Non ancora implementata: il valore viene salvato ma non applicato");
-    Slider::new("Colore", 0.0..=100.0, 25.0).show(ui, &mut d.color_nr);
-    Slider::new("Dett. colore", 0.0..=100.0, 50.0).show(ui, &mut d.color_nr_detail);
-    Slider::new("Unif. colore", 0.0..=100.0, 50.0).show(ui, &mut d.color_nr_smoothness);
+        .on_hover_text(tr("Not implemented yet: the value is saved but not applied", "Non ancora implementata: il valore viene salvato ma non applicato"));
+    Slider::new(tr("Color", "Colore"), 0.0..=100.0, 25.0).show(ui, &mut d.color_nr);
+    Slider::new(tr("Color detail", "Dett. colore"), 0.0..=100.0, 50.0).show(ui, &mut d.color_nr_detail);
+    Slider::new(tr("Color smooth.", "Unif. colore"), 0.0..=100.0, 50.0).show(ui, &mut d.color_nr_smoothness);
 }
 
 fn effects(ui: &mut Ui, edit: &mut Edit) {
     let e = &mut edit.settings.effects;
-    subheading(ui, "Vignettatura post-ritaglio");
-    Slider::new("Fattore", -100.0..=100.0, 0.0).colors(&[Color32::from_gray(25), Color32::from_gray(230)]).show(ui, &mut e.vignette_amount);
-    Slider::new("Punto medio", 0.0..=100.0, 50.0).show(ui, &mut e.vignette_midpoint);
-    Slider::new("Rotondità", -100.0..=100.0, 0.0).show(ui, &mut e.vignette_roundness);
-    Slider::new("Sfumatura", 0.0..=100.0, 50.0).show(ui, &mut e.vignette_feather);
-    subheading(ui, "Grana");
+    subheading(ui, tr("Post-crop vignetting", "Vignettatura post-ritaglio"));
+    Slider::new(tr("Amount", "Fattore"), -100.0..=100.0, 0.0).colors(&[Color32::from_gray(25), Color32::from_gray(230)]).show(ui, &mut e.vignette_amount);
+    Slider::new(tr("Midpoint", "Punto medio"), 0.0..=100.0, 50.0).show(ui, &mut e.vignette_midpoint);
+    Slider::new(tr("Roundness", "Rotondità"), -100.0..=100.0, 0.0).show(ui, &mut e.vignette_roundness);
+    Slider::new(tr("Feather", "Sfumatura"), 0.0..=100.0, 50.0).show(ui, &mut e.vignette_feather);
+    subheading(ui, tr("Grain", "Grana"));
     ui.push_id("grain", |ui| {
-        Slider::new("Fattore", 0.0..=100.0, 0.0).show(ui, &mut e.grain_amount);
-        Slider::new("Dimensione", 0.0..=100.0, 25.0).show(ui, &mut e.grain_size);
-        Slider::new("Ruvidità", 0.0..=100.0, 50.0).show(ui, &mut e.grain_frequency);
+        Slider::new(tr("Amount", "Fattore"), 0.0..=100.0, 0.0).show(ui, &mut e.grain_amount);
+        Slider::new(tr("Size", "Dimensione"), 0.0..=100.0, 25.0).show(ui, &mut e.grain_size);
+        Slider::new(tr("Roughness", "Ruvidità"), 0.0..=100.0, 50.0).show(ui, &mut e.grain_frequency);
     });
 }
 
 fn calibration(ui: &mut Ui, edit: &mut Edit) {
     let c = &mut edit.settings.calibration;
-    Slider::new("Tinta ombre", -100.0..=100.0, 0.0).colors(&TINT_COLORS).show(ui, &mut c.shadow_tint);
+    Slider::new(tr("Shadows tint", "Tinta ombre"), -100.0..=100.0, 0.0).colors(&TINT_COLORS).show(ui, &mut c.shadow_tint);
     for (name, deg, hue, sat) in [
-        ("Primario rosso", 0.0, &mut c.red_hue, &mut c.red_sat),
-        ("Primario verde", 120.0, &mut c.green_hue, &mut c.green_sat),
-        ("Primario blu", 235.0, &mut c.blue_hue, &mut c.blue_sat),
+        (tr("Red primary", "Primario rosso"), 0.0, &mut c.red_hue, &mut c.red_sat),
+        (tr("Green primary", "Primario verde"), 120.0, &mut c.green_hue, &mut c.green_sat),
+        (tr("Blue primary", "Primario blu"), 235.0, &mut c.blue_hue, &mut c.blue_sat),
     ] {
         subheading(ui, name);
         ui.push_id(name, |ui| {
             let hues = [hue_color(deg - 35.0, 0.8), hue_color(deg, 0.8), hue_color(deg + 35.0, 0.8)];
-            Slider::new("Tonalità", -100.0..=100.0, 0.0).colors(&hues).show(ui, hue);
-            Slider::new("Saturazione", -100.0..=100.0, 0.0).colors(&[hue_color(deg, 0.0), hue_color(deg, 0.9)]).show(ui, sat);
+            Slider::new(tr("Hue", "Tonalità"), -100.0..=100.0, 0.0).colors(&hues).show(ui, hue);
+            Slider::new(tr("Saturation", "Saturazione"), -100.0..=100.0, 0.0).colors(&[hue_color(deg, 0.0), hue_color(deg, 0.9)]).show(ui, sat);
         });
     }
 }

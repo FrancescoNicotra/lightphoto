@@ -229,6 +229,7 @@ dependencies = [
  "pipeline",
  "raw",
  "rfd",
+ "sys-locale",
  "xmp",
 ]
 
