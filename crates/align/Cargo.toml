@@ -1,0 +1,9 @@
+[package]
+name = "align"
+description = "Image alignment: pyramid + ECC (translation to homography) and bicubic warping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true

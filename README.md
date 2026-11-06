@@ -100,6 +100,7 @@ cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # Δ
 | `crates/xmp` | reading and writing Camera Raw XMP settings, presets and embedded tables ([docs/xmp-format.md](docs/xmp-format.md)) |
 | `crates/lut` | `.cube` / `.3dl` LUTs |
 | `crates/export` | resizing and JPEG/PNG/TIFF encoding with colour profile and EXIF |
+| `crates/align` | image alignment (pyramid + ECC, translation to homography) and warping, for HDR merge ([docs/align.md](docs/align.md)) |
 | `tools/` | `lumen-cli`, `xmp-dump`, `compare` |
 
 ## Adobe profiles
