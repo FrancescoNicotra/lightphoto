@@ -58,6 +58,21 @@ pub fn illuminant_temperature(code: u16) -> f64 {
     }
 }
 
+/// The EXIF LightSource code to write for a calibration temperature: the
+/// inverse of [`illuminant_temperature`] for the temperatures it returns
+/// (StdA for 2850 K, D65 for 6500 K…), otherwise the code with the nearest
+/// temperature; 0 (unknown) for 0 K.
+pub fn illuminant_code(temperature: f64) -> u16 {
+    const CODES: [u16; 11] = [17, 24, 23, 20, 21, 22, 12, 14, 15, 16, 0];
+    CODES
+        .into_iter()
+        .min_by(|&a, &b| {
+            let d = |c| (illuminant_temperature(c) - temperature).abs();
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap_or(0)
+}
+
 impl ColorProfile {
     pub fn new(mut calibrations: Vec<Calibration>, analog_balance: Option<Mat3>) -> Self {
         calibrations.sort_by(|a, b| a.temperature.total_cmp(&b.temperature));
@@ -196,6 +211,17 @@ pub fn normalize_max(v: Vec3) -> Vec3 {
 mod tests {
     use super::*;
     use crate::color::{mul_vec, D50, D65};
+
+    #[test]
+    fn illuminant_codes_round_trip() {
+        for code in 0..=24 {
+            let t = illuminant_temperature(code);
+            assert_eq!(illuminant_temperature(illuminant_code(t)), t, "code {code}");
+        }
+        assert_eq!(illuminant_code(2850.0), 17);
+        assert_eq!(illuminant_code(6500.0), 21);
+        assert_eq!(illuminant_code(6000.0), 12);
+    }
 
     // A two-illuminant (StdA, D65) profile. CM_D65 is the GX80's real D65
     // matrix; the others are made up. Forward matrix rows sum to the D50

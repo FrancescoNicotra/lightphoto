@@ -9,6 +9,7 @@ license.workspace = true
 rawler.workspace = true
 image.workspace = true
 rayon.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 xmp.workspace = true

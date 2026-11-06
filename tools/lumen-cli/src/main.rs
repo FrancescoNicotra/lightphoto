@@ -9,13 +9,15 @@ use std::time::Instant;
 use export::{ExportOptions, Format, Size};
 use pipeline::adobe::{self, AdobeProfiles};
 use pipeline::{Pipeline, RenderOptions, SourceKind};
-use raw::{DecodeOptions, Photo, TempTint};
+use raw::{CameraData, ColorSource, DecodeOptions, DngEncoding, LinearDng, Orientation, Photo, PhotoInfo, TempTint};
 use xmp::{DevelopSettings, Preset, WhiteBalance};
 
 const USAGE: &str = "usage:
   lumen-cli info    <photo>
   lumen-cli develop <photo>... -o <out.jpg | dir/> [options]
   lumen-cli preview <photo> -o out.jpg       (extracts the preview embedded in a RAW file)
+  lumen-cli dng     <raw> -o out.dng [--half] [--uncompressed] [--no-adobe]
+                    (rewrites a RAW as a linear floating point DNG, the format of HDR merges)
   lumen-cli cube    <preset.xmp> -o out.cube [--grid 33]
 
 develop options:
@@ -33,7 +35,12 @@ develop options:
   --no-adobe          do not use Adobe's camera/look profiles from a local Lightroom or
                       Camera Raw install (found automatically, or in LUMEN_ADOBE_DIR)
 
-  .jpg is 8 bit, .png/.tif 16 bit; all carry an sRGB ICC profile";
+  .jpg is 8 bit, .png/.tif 16 bit; all carry an sRGB ICC profile
+
+dng options:
+  --half              decode at half resolution first
+  --uncompressed      32 bit floats in plain strips instead of compressed half floats (debugging)
+  --no-adobe          render the embedded preview without Adobe's profiles";
 
 #[derive(PartialEq)]
 enum Command {
@@ -41,6 +48,7 @@ enum Command {
     Develop,
     Preview,
     Cube,
+    Dng,
 }
 
 struct Args {
@@ -61,6 +69,7 @@ struct Args {
     fast: bool,
     half: bool,
     no_adobe: bool,
+    uncompressed: bool,
     grid: usize,
 }
 
@@ -71,6 +80,7 @@ fn parse_args() -> Result<Args, String> {
         Some("develop") => Command::Develop,
         Some("preview") => Command::Preview,
         Some("cube") => Command::Cube,
+        Some("dng") => Command::Dng,
         Some("-h" | "--help") | None => return Err(String::new()),
         Some(c) => return Err(format!("unknown command {c:?}")),
     };
@@ -92,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
         fast: false,
         half: false,
         no_adobe: false,
+        uncompressed: false,
         grid: 33,
     };
     fn num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
@@ -117,6 +128,7 @@ fn parse_args() -> Result<Args, String> {
             "--fast" => args.fast = true,
             "--half" => args.half = true,
             "--no-adobe" => args.no_adobe = true,
+            "--uncompressed" => args.uncompressed = true,
             "--grid" => args.grid = num::<usize>("--grid", it.next())?.clamp(2, 129),
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a:?}")),
@@ -151,6 +163,7 @@ fn main() -> ExitCode {
         Command::Develop => develop(&args),
         Command::Preview => preview(&args),
         Command::Cube => cube(&args),
+        Command::Dng => dng(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -334,5 +347,66 @@ fn cube(args: &Args) -> CliResult<()> {
     Pipeline::to_cube(&settings, args.grid).write_cube(out, Some(&title))?;
     println!("wrote {out:?}: {0}×{0}×{0}, sRGB in / sRGB out", args.grid);
     println!("note: white balance, Texture/Clarity/Dehaze, sharpening, noise reduction, vignette and grain are not in the LUT");
+    Ok(())
+}
+
+/// A RAW file rewritten as the DNG an HDR merge of that single frame would
+/// give: linear camera RGB in half floats, the source's colour tags and EXIF,
+/// and a preview rendered with the default settings.
+fn dng(args: &Args) -> CliResult<()> {
+    let input = &args.inputs[0];
+    let out = args.output.as_ref().unwrap();
+    let t = Instant::now();
+    let capture = raw::load_capture(input, &DecodeOptions { half_size: args.half })?;
+    let t_decode = t.elapsed();
+
+    // The preview is stored in sensor orientation, like the raw data.
+    let full_size = capture.data.width.max(capture.data.height);
+    let mut photo = Photo {
+        info: PhotoInfo { orientation: Orientation::Normal, ..capture.info.clone() },
+        data: capture.data.downscale(raw::dng_write::PREVIEW_SIZE as usize),
+        color: ColorSource::Camera(Box::new(CameraData { profile: capture.profile.clone(), as_shot_neutral: capture.as_shot_neutral })),
+    };
+    let mut settings = DevelopSettings::default();
+    let adobe_profiles = if args.no_adobe { AdobeProfiles::default() } else { AdobeProfiles::discover() };
+    let prepared = adobe::prepare(&adobe_profiles, &mut photo, &mut settings);
+    let pipeline = Pipeline::new(&settings, SourceKind::of(&photo));
+    let rendered = pipeline.render(&photo, &RenderOptions { max_size: None, full_size: Some(full_size) });
+    let preview = image::RgbImage::from_raw(rendered.width as u32, rendered.height as u32, raw::encode_srgb8(&rendered, 0.0))
+        .ok_or("preview size mismatch")?;
+    if let Some(p) = &prepared.camera_profile {
+        eprintln!("preview uses Adobe profile {}", p.display());
+    }
+    let t_preview = t.elapsed() - t_decode;
+
+    let xmp = format!(
+        r#"<?xpacket begin="{bom}" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:CreatorTool="Lumen {version}"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#,
+        bom = '\u{feff}',
+        version = env!("CARGO_PKG_VERSION")
+    );
+    let dng = LinearDng { xmp: Some(xmp.as_bytes()), preview: Some(&preview), ..LinearDng::from_capture(&capture) };
+    let encoding = if args.uncompressed { DngEncoding::F32Uncompressed } else { DngEncoding::HalfDeflate };
+    raw::write_linear_dng(out, &dng, encoding)?;
+    let t_write = t.elapsed() - t_decode - t_preview;
+
+    let bytes = std::fs::metadata(out)?.len();
+    println!(
+        "wrote {} ({} × {}, {}, {:.1} MB, {:.1} bytes/pixel) — decode {} ms, preview {} ms, write {} ms",
+        out.display(),
+        capture.data.width,
+        capture.data.height,
+        if args.uncompressed { "32 bit float" } else { "16 bit half float" },
+        bytes as f64 / 1e6,
+        bytes as f64 / (capture.data.width * capture.data.height) as f64,
+        t_decode.as_millis(),
+        t_preview.as_millis(),
+        t_write.as_millis()
+    );
     Ok(())
 }
