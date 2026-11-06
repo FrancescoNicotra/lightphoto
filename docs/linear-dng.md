@@ -65,7 +65,7 @@ rawler already decodes them (strips or Deflate tiles with predictor 3, 34894 or 
 
 - `cargo test -p raw --test dng_write`: round trip through rawler's decoder for both encodings (relative error ≤ 10⁻³ for half floats, exact for f32; matrices, neutral, BaselineExposure, orientation, EXIF, XMP and preview preserved); the clipping mask; a synthetic Bayer DNG rewritten as a linear DNG develops like the original (ΔE2000 < 0.5 at every pixel); floating point DNGs without `WhiteLevel` or with an integer one.
 - `lumen-cli dng photo.RW2 -o photo-linear.dng` rewrites a RAW as the DNG an HDR merge of that single frame would produce, with a preview rendered at default settings. Developed with `lumen-cli develop`, the GX80 sample matches the RW2 with a mean ΔE2000 of 0.01 (p95 0.01); the few larger differences are the negative values written as 0.
-- Lightroom/Camera Raw compatibility is checked by opening such a DNG there.
+- Lightroom: the DNG of the GX80 sample written by `lumen-cli dng` opens and develops correctly (checked by hand, November 2026). Check again after changing tags or the encoder.
 
 ## Not done yet
 
