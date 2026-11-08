@@ -19,6 +19,10 @@ const USAGE: &str = "usage:
   lumen-cli dng     <raw> -o out.dng [--half] [--uncompressed] [--no-adobe]
                     (rewrites a RAW as a linear floating point DNG, the format of HDR merges)
   lumen-cli cube    <preset.xmp> -o out.cube [--grid 33]
+  lumen-cli hdr     <raw> <raw>... [-o out.dng] [--no-align] [--auto-crop] [--uncompressed]
+                    [--timings] [--no-adobe]
+                    (merges 2–9 bracketed RAW files into a floating point DNG; without -o,
+                    <first>-HDR.dng next to the first file)
 
 develop options:
   --preset P.xmp      Lightroom/Camera Raw preset (.xmp, or a .dng/.jpg carrying one)
@@ -37,6 +41,11 @@ develop options:
 
   .jpg is 8 bit, .png/.tif 16 bit; all carry an sRGB ICC profile
 
+hdr options:
+  --no-align          do not align the shots (tripod)
+  --auto-crop         crop (crs:Crop*, editable) to the area every aligned shot covers
+  --timings           print the time of each step
+
 dng options:
   --half              decode at half resolution first
   --uncompressed      32 bit floats in plain strips instead of compressed half floats (debugging)
@@ -49,6 +58,7 @@ enum Command {
     Preview,
     Cube,
     Dng,
+    Hdr,
 }
 
 struct Args {
@@ -71,6 +81,9 @@ struct Args {
     no_adobe: bool,
     uncompressed: bool,
     grid: usize,
+    no_align: bool,
+    auto_crop: bool,
+    timings: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -81,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
         Some("preview") => Command::Preview,
         Some("cube") => Command::Cube,
         Some("dng") => Command::Dng,
+        Some("hdr") => Command::Hdr,
         Some("-h" | "--help") | None => return Err(String::new()),
         Some(c) => return Err(format!("unknown command {c:?}")),
     };
@@ -104,6 +118,9 @@ fn parse_args() -> Result<Args, String> {
         no_adobe: false,
         uncompressed: false,
         grid: 33,
+        no_align: false,
+        auto_crop: false,
+        timings: false,
     };
     fn num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
         v.as_deref().and_then(|s| s.parse().ok()).ok_or(format!("{flag} needs a number"))
@@ -129,6 +146,9 @@ fn parse_args() -> Result<Args, String> {
             "--half" => args.half = true,
             "--no-adobe" => args.no_adobe = true,
             "--uncompressed" => args.uncompressed = true,
+            "--no-align" => args.no_align = true,
+            "--auto-crop" => args.auto_crop = true,
+            "--timings" => args.timings = true,
             "--grid" => args.grid = num::<usize>("--grid", it.next())?.clamp(2, 129),
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a:?}")),
@@ -138,10 +158,10 @@ fn parse_args() -> Result<Args, String> {
     if args.inputs.is_empty() {
         return Err("missing input file".into());
     }
-    if args.command != Command::Develop && args.inputs.len() > 1 {
+    if !matches!(args.command, Command::Develop | Command::Hdr) && args.inputs.len() > 1 {
         return Err("this command takes a single input".into());
     }
-    if args.command != Command::Info && args.output.is_none() {
+    if !matches!(args.command, Command::Info | Command::Hdr) && args.output.is_none() {
         return Err("missing -o <output>".into());
     }
     Ok(args)
@@ -164,6 +184,7 @@ fn main() -> ExitCode {
         Command::Preview => preview(&args),
         Command::Cube => cube(&args),
         Command::Dng => dng(&args),
+        Command::Hdr => hdr(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -408,5 +429,67 @@ fn dng(args: &Args) -> CliResult<()> {
         t_preview.as_millis(),
         t_write.as_millis()
     );
+    Ok(())
+}
+
+/// Merges a bracket into a floating point HDR DNG.
+fn hdr(args: &Args) -> CliResult<()> {
+    let t = Instant::now();
+    let opts = merge::MergeOptions {
+        align: !args.no_align,
+        auto_crop: args.auto_crop,
+        encoding: if args.uncompressed { DngEncoding::F32Uncompressed } else { DngEncoding::HalfDeflate },
+        adobe: if args.no_adobe { AdobeProfiles::default() } else { AdobeProfiles::discover() },
+    };
+    let sources = args.inputs.iter().cloned().map(merge::Source::File).collect();
+    let (merged, written) = merge::merge_hdr(sources, args.output.as_deref(), &opts, &merge::Control::default())?;
+
+    for f in &merged.frames {
+        let exif = f.exif_ev.map_or_else(|| "no EXIF".to_string(), |e| format!("EXIF {e:+.2}"));
+        let align = match &f.alignment {
+            merge::AlignStatus::Reference => "reference".to_string(),
+            merge::AlignStatus::Disabled => "not aligned".to_string(),
+            merge::AlignStatus::Failed => "alignment failed".to_string(),
+            merge::AlignStatus::Aligned { correlation, model } => {
+                let (dx, dy) = f.transform.apply(0.5, 0.5);
+                format!("aligned ({model:?}, ρ {correlation:.4}, shift {:+.1} {:+.1} px)", dx - 0.5, dy - 0.5)
+            }
+        };
+        println!("  {:<24} {:+.2} EV ({exif}, {:?}), {align}", f.name, f.ev, f.ev_source);
+    }
+    for w in &merged.warnings {
+        eprintln!("warning: {w}");
+    }
+    if let Some(c) = merged.crop {
+        println!("  auto crop: left {:.3}, top {:.3}, right {:.3}, bottom {:.3}", c.left, c.top, c.right, c.bottom);
+    }
+    println!(
+        "wrote {} ({} × {}, {:.1} MB), BaselineExposure {:+.2} EV, BaselineNoise {:.2} — {} ms",
+        written.path.display(),
+        written.width,
+        written.height,
+        written.bytes as f64 / 1e6,
+        written.baseline_exposure,
+        merged.baseline_noise,
+        t.elapsed().as_millis()
+    );
+    if args.timings {
+        let tm = &merged.timings;
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        println!("timings (ms):");
+        for (name, d) in [
+            ("decode, half size", tm.decode_half),
+            ("align + warp, half size", tm.align),
+            ("exposures", tm.exposure),
+            ("ghosts", tm.ghosts),
+            ("decode, full size", tm.decode_full),
+            ("warp + accumulate", tm.accumulate),
+            ("scale + preview", tm.preview),
+            ("write", tm.write),
+        ] {
+            println!("  {name:<26}{:>8.0}", ms(d));
+        }
+        println!("  {:<26}{:>8.0}", "total", ms(tm.total()));
+    }
     Ok(())
 }

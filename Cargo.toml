@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/xmp", "crates/lut", "crates/raw", "crates/pipeline", "crates/export", "crates/align", "tools/xmp-dump", "tools/lumen-cli", "tools/compare", "crates/app"]
+members = ["crates/xmp", "crates/lut", "crates/raw", "crates/pipeline", "crates/export", "crates/align", "crates/merge", "tools/xmp-dump", "tools/lumen-cli", "tools/compare", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ raw = { path = "crates/raw" }
 pipeline = { path = "crates/pipeline" }
 export = { path = "crates/export" }
 align = { path = "crates/align" }
+merge = { path = "crates/merge" }
 roxmltree = "0.20"
 flate2 = "1"
 rawler = "0.8"
@@ -35,4 +36,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.align]
+opt-level = 3
+
+[profile.dev.package.merge]
 opt-level = 3
