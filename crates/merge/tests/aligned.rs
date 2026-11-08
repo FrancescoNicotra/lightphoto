@@ -67,6 +67,8 @@ fn unrelated_shot_fails_alignment_with_a_warning() {
             assert!(p.warnings.contains(&Warning::AlignmentFailed("alien".into())), "{:?}", p.frames[2].alignment);
             assert_eq!(p.frames[2].alignment, AlignStatus::Failed);
             assert_eq!(p.frames[2].transform, Transform::IDENTITY);
+            // Ghost removal is forced to Medium even though it was off.
+            assert_eq!(p.ghosts.as_ref().map(|g| g.level), Some(merge::Deghost::Medium));
         }
         // Too few pixels agree for an exposure ratio: also acceptable.
         Err(merge::MergeError::NoExposure(v)) => assert_eq!(v, vec!["alien".to_string()]),

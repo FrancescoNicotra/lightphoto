@@ -12,6 +12,7 @@
 //!
 //! See `docs/merge.md`.
 
+pub mod alignment;
 mod bracket;
 mod crop;
 pub mod exposure;
@@ -24,13 +25,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use align::{AlignParams, Model, Plane, Transform};
+use align::{Model, Plane, Transform};
 use pipeline::adobe::AdobeProfiles;
 use raw::{Capture, DngEncoding, Image, LinearDng};
 use rayon::prelude::*;
 
 pub use bracket::Source;
 pub use exposure::EvSource;
+pub use ghost::{Deghost, Ghosts};
 pub use hdr::Shot;
 pub use output::{default_output_path, CropRect};
 
@@ -47,6 +49,8 @@ pub struct MergeOptions {
     /// Write a `crs:Crop*` rectangle excluding the borders that not every
     /// aligned shot covers.
     pub auto_crop: bool,
+    /// Ghost removal; raised to at least Medium when a shot fails to align.
+    pub deghost: Deghost,
     pub encoding: DngEncoding,
     /// Adobe profiles for the embedded preview (empty = the file's matrices).
     pub adobe: AdobeProfiles,
@@ -54,7 +58,7 @@ pub struct MergeOptions {
 
 impl Default for MergeOptions {
     fn default() -> Self {
-        MergeOptions { align: true, auto_crop: false, encoding: DngEncoding::HalfDeflate, adobe: AdobeProfiles::default() }
+        MergeOptions { align: true, auto_crop: false, deghost: Deghost::None, encoding: DngEncoding::HalfDeflate, adobe: AdobeProfiles::default() }
     }
 }
 
@@ -210,6 +214,8 @@ pub struct Prepared {
     pub baseline_noise: f64,
     /// The half-size shots, warped into the reference frame.
     pub shots: Vec<Shot>,
+    /// Moving regions and their sources, with ghost removal on.
+    pub ghosts: Option<Ghosts>,
     pub timings: Timings,
     plans: Vec<FramePlan>,
     /// Reference metadata (no pixels).
@@ -270,12 +276,12 @@ pub fn prepare(sources: Vec<Source>, opts: &MergeOptions, ctl: &Control) -> Resu
     status[reference] = AlignStatus::Reference;
     if opts.align {
         ctl.check()?;
-        let planes: Vec<Plane> = shots.par_iter().map(align_plane).collect();
+        let planes: Vec<Plane> = shots.par_iter().map(alignment::align_plane).collect();
         // Link k: order[k] relative to its neighbour towards the reference.
         let neighbour = |k: usize| if k > rpos { k - 1 } else { k + 1 };
         let links: Vec<Option<align::Alignment>> = (0..n)
             .into_par_iter()
-            .map(|k| (k != rpos).then(|| align_pair(&planes[order[neighbour(k)]], &planes[order[k]])).flatten())
+            .map(|k| (k != rpos).then(|| alignment::align_pair(&planes[order[neighbour(k)]], &planes[order[k]])).flatten())
             .collect();
         let mut done = vec![false; n];
         done[rpos] = true;
@@ -286,7 +292,7 @@ pub fn prepare(sources: Vec<Source>, opts: &MergeOptions, ctl: &Control) -> Resu
             let chained = links[k].as_ref().filter(|a| a.converged && done[prev]);
             let result = match chained {
                 Some(a) => Some((a.transform.compose(&half_t[order[prev]]), a.correlation, a.model)),
-                None => align_pair(&planes[reference], &planes[i]).map(|a| (a.transform, a.correlation, a.model)),
+                None => alignment::align_pair(&planes[reference], &planes[i]).map(|a| (a.transform, a.correlation, a.model)),
             };
             match result {
                 Some((tr, correlation, model)) => {
@@ -361,7 +367,7 @@ pub fn prepare(sources: Vec<Source>, opts: &MergeOptions, ctl: &Control) -> Resu
     let darkest = (0..n).min_by(|&a, &b| e[a].total_cmp(&e[b])).expect("shots");
     let to_full = sources[reference].half_to_full(&halves[reference]);
     let from_full = to_full.inverse().expect("invertible scale");
-    let plans: Vec<FramePlan> = (0..n)
+    let mut plans: Vec<FramePlan> = (0..n)
         .map(|i| FramePlan {
             source: sources[i].clone(),
             weight: FrameWeight {
@@ -380,6 +386,21 @@ pub fn prepare(sources: Vec<Source>, opts: &MergeOptions, ctl: &Control) -> Resu
         })
         .collect();
 
+    // Ghosts: a shot left unaligned needs at least Medium.
+    let t = Instant::now();
+    let failed = warnings.iter().any(|w| matches!(w, Warning::AlignmentFailed(_)));
+    let deghost = if failed { opts.deghost.max(Deghost::Medium) } else { opts.deghost };
+    ctl.check()?;
+    let weights: Vec<FrameWeight> = plans.iter().map(|p| p.weight).collect();
+    let ghosts = ghost::detect(&shots, &weights, reference, &order, deghost, from_full);
+    if let Some(g) = &ghosts {
+        for (p, m) in plans.iter_mut().zip(&g.masks) {
+            p.ghost = m.clone();
+        }
+    }
+    ctl.report(Stage::Ghosts, 1.0);
+    timings.ghosts = t.elapsed();
+
     let crop = if opts.auto_crop { auto_crop(&shots) } else { None };
     let baseline_noise = baseline_noise(&shots, &plans);
 
@@ -394,43 +415,7 @@ pub fn prepare(sources: Vec<Source>, opts: &MergeOptions, ctl: &Control) -> Resu
             transform: plans[i].transform.unwrap_or(Transform::IDENTITY),
         })
         .collect();
-    Ok(Prepared { frames, reference, warnings, crop, baseline_noise, shots, timings, plans, meta })
-}
-
-/// A homography must reduce the residual `1 − ρ` of a similarity by this
-/// factor to be used.
-const HOMOGRAPHY_GAIN: f32 = 0.8;
-
-/// Aligns `moving` to `reference` with a similarity, or a homography when it
-/// fits clearly better. Shots two or more EV apart share only a band of
-/// valid pixels, where the perspective terms of a homography are poorly
-/// constrained and extrapolate badly to the corners; a hand-held bracket
-/// rarely needs them. `None` when neither converges.
-fn align_pair(reference: &Plane, moving: &Plane) -> Option<align::Alignment> {
-    let run = |model| align::align(reference, moving, &AlignParams { model, ..AlignParams::default() }).ok().filter(|a| a.converged);
-    let (s, h) = rayon::join(|| run(Model::Similarity), || run(Model::Homography));
-    match (s, h) {
-        (Some(s), Some(h)) if h.model == Model::Homography && (1.0 - h.correlation) < HOMOGRAPHY_GAIN * (1.0 - s.correlation) => Some(h),
-        (Some(s), _) => Some(s),
-        (None, h) => h,
-    }
-}
-
-/// Log luminance for alignment, weighted 0 where clipped (h < 0.5) or near
-/// the noise floor.
-fn align_plane(s: &Shot) -> Plane {
-    let (w, h) = (s.data.width, s.data.height);
-    let px = &s.data.pixels;
-    let data = px.par_iter().map(|p| ((p[0] + p[1] + p[2]) / 3.0).max(1e-4).log2()).collect();
-    let weight = px
-        .par_iter()
-        .zip(&s.clipped)
-        .map(|(p, &c)| {
-            let y = (p[0] + p[1] + p[2]) / 3.0;
-            f32::from(weights::highlight_weight(weights::max3(*p), c != 0) >= 0.5 && y >= 0.01)
-        })
-        .collect();
-    Plane { width: w, height: h, data, weight: Some(weight) }
+    Ok(Prepared { frames, reference, warnings, crop, baseline_noise, shots, ghosts, timings, plans, meta })
 }
 
 fn auto_crop(shots: &[Shot]) -> Option<CropRect> {
@@ -484,6 +469,7 @@ pub struct Merged {
     pub warnings: Vec<Warning>,
     pub crop: Option<CropRect>,
     pub baseline_noise: f64,
+    pub ghosts: Option<Ghosts>,
     pub timings: Timings,
     meta: Capture,
 }
@@ -491,15 +477,15 @@ pub struct Merged {
 impl Prepared {
     /// The merge at half size, from the shots already in memory.
     pub fn preview(&self) -> Image {
-        hdr::merge_shots(&self.shots, &self.plans, false)
+        hdr::merge_shots(&self.shots, &self.plans, self.ghosts.is_some())
     }
 
     /// Pass 2: the full-resolution merge. The half-size shots are dropped first.
     pub fn merge(self, ctl: &Control) -> Result<Merged, MergeError> {
-        let Prepared { frames, reference, warnings, crop, baseline_noise, shots, mut timings, plans, meta } = self;
+        let Prepared { frames, reference, warnings, crop, baseline_noise, shots, ghosts, mut timings, plans, meta } = self;
         drop(shots);
         let image = hdr::merge_full(&plans, reference, ctl, &mut timings)?;
-        Ok(Merged { image, frames, warnings, crop, baseline_noise, timings, meta })
+        Ok(Merged { image, frames, warnings, crop, baseline_noise, ghosts, timings, meta })
     }
 }
 
@@ -516,6 +502,11 @@ pub struct Written {
 }
 
 impl Merged {
+    /// EXIF orientation of the shots (not applied to `image`).
+    pub fn orientation(&self) -> raw::Orientation {
+        self.meta.info.orientation
+    }
+
     /// Scales the radiance, renders the preview and writes the DNG (through
     /// a temporary file, renamed when complete).
     pub fn write_dng(&mut self, path: &Path, opts: &MergeOptions, ctl: &Control) -> Result<Written, MergeError> {

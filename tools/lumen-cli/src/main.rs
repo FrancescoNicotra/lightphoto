@@ -9,7 +9,7 @@ use std::time::Instant;
 use export::{ExportOptions, Format, Size};
 use pipeline::adobe::{self, AdobeProfiles};
 use pipeline::{Pipeline, RenderOptions, SourceKind};
-use raw::{CameraData, ColorSource, DecodeOptions, DngEncoding, LinearDng, Orientation, Photo, PhotoInfo, TempTint};
+use raw::{CameraData, ColorSource, DecodeOptions, DngEncoding, Image, LinearDng, Orientation, Photo, PhotoInfo, TempTint};
 use xmp::{DevelopSettings, Preset, WhiteBalance};
 
 const USAGE: &str = "usage:
@@ -19,8 +19,8 @@ const USAGE: &str = "usage:
   lumen-cli dng     <raw> -o out.dng [--half] [--uncompressed] [--no-adobe]
                     (rewrites a RAW as a linear floating point DNG, the format of HDR merges)
   lumen-cli cube    <preset.xmp> -o out.cube [--grid 33]
-  lumen-cli hdr     <raw> <raw>... [-o out.dng] [--no-align] [--auto-crop] [--uncompressed]
-                    [--timings] [--no-adobe]
+  lumen-cli hdr     <raw> <raw>... [-o out.dng] [--no-align] [--deghost none|low|medium|high]
+                    [--auto-crop] [--uncompressed] [--timings] [--ghost-mask m.png] [--no-adobe]
                     (merges 2–9 bracketed RAW files into a floating point DNG; without -o,
                     <first>-HDR.dng next to the first file)
 
@@ -43,6 +43,8 @@ develop options:
 
 hdr options:
   --no-align          do not align the shots (tripod)
+  --deghost L         ghost removal: none (default), low, medium, high
+  --ghost-mask M.png  write the ghost mask (white = single-source regions), half size, oriented
   --auto-crop         crop (crs:Crop*, editable) to the area every aligned shot covers
   --timings           print the time of each step
 
@@ -84,6 +86,8 @@ struct Args {
     no_align: bool,
     auto_crop: bool,
     timings: bool,
+    deghost: merge::Deghost,
+    ghost_mask: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -121,6 +125,8 @@ fn parse_args() -> Result<Args, String> {
         no_align: false,
         auto_crop: false,
         timings: false,
+        deghost: merge::Deghost::None,
+        ghost_mask: None,
     };
     fn num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
         v.as_deref().and_then(|s| s.parse().ok()).ok_or(format!("{flag} needs a number"))
@@ -149,6 +155,8 @@ fn parse_args() -> Result<Args, String> {
             "--no-align" => args.no_align = true,
             "--auto-crop" => args.auto_crop = true,
             "--timings" => args.timings = true,
+            "--deghost" => args.deghost = value("--deghost", it.next())?.parse()?,
+            "--ghost-mask" => args.ghost_mask = Some(value("--ghost-mask", it.next())?.into()),
             "--grid" => args.grid = num::<usize>("--grid", it.next())?.clamp(2, 129),
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a:?}")),
@@ -438,6 +446,7 @@ fn hdr(args: &Args) -> CliResult<()> {
     let opts = merge::MergeOptions {
         align: !args.no_align,
         auto_crop: args.auto_crop,
+        deghost: args.deghost,
         encoding: if args.uncompressed { DngEncoding::F32Uncompressed } else { DngEncoding::HalfDeflate },
         adobe: if args.no_adobe { AdobeProfiles::default() } else { AdobeProfiles::discover() },
     };
@@ -459,6 +468,28 @@ fn hdr(args: &Args) -> CliResult<()> {
     }
     for w in &merged.warnings {
         eprintln!("warning: {w}");
+    }
+    if let Some(g) = &merged.ghosts {
+        println!(
+            "  ghosts ({:?}): {} region(s), {:.2}% of the image, sources {:?}",
+            g.level,
+            g.regions.len(),
+            100.0 * g.motion_area(),
+            g.regions.iter().map(|r| merged.frames[r.source].name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    if let Some(path) = &args.ghost_mask {
+        let g = merged.ghosts.as_ref().ok_or("--ghost-mask needs --deghost low, medium or high")?;
+        // Grey = feathered sources, white = detected motion.
+        let img = Image::from_fn(g.width, g.height, |x, y| {
+            let i = y * g.width + x;
+            let v = if g.motion[i] { 1.0 } else { 0.6 * g.overlay[i] };
+            [v; 3]
+        })
+        .oriented(merged.orientation());
+        let grey: Vec<u8> = img.pixels.iter().map(|p| (p[0] * 255.0).round() as u8).collect();
+        image::GrayImage::from_raw(img.width as u32, img.height as u32, grey).ok_or("mask size")?.save(path)?;
+        println!("  ghost mask: {}", path.display());
     }
     if let Some(c) = merged.crop {
         println!("  auto crop: left {:.3}, top {:.3}, right {:.3}, bottom {:.3}", c.left, c.top, c.right, c.bottom);

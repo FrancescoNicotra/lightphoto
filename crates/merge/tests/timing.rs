@@ -8,7 +8,7 @@
 mod common;
 
 use align::Transform;
-use common::scene::{Scene, ShotSpec};
+use common::scene::{Mover, Scene, ShotSpec};
 
 #[test]
 #[ignore = "writes ~150 MB; timing only"]
@@ -16,14 +16,18 @@ fn write_24mp_bracket() {
     let dir = std::path::PathBuf::from(std::env::var("LUMEN_BRACKET_DIR").expect("LUMEN_BRACKET_DIR"));
     std::fs::create_dir_all(&dir).unwrap();
     let (w, h) = (6000, 4000);
-    let scene = Scene::new(31, w, h);
+    let mut scene = Scene::new(31, w, h);
+    // A person-sized dark disk walking across the frame.
+    scene.mover = Some(Mover { radius: 350.0, level: 0.01 });
     let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
+    let walk = |i: usize| Some((1600.0 + 450.0 * i as f64, 1700.0));
     let specs = [
         ShotSpec { exif_time: Some(1.0 / 400.0), transform: Transform::translation(-9.3, 14.6), ..ShotSpec::new(0.25, 1) },
         ShotSpec { exif_time: Some(1.0 / 100.0), ..ShotSpec::new(1.0, 2) },
         ShotSpec { exif_time: Some(1.0 / 25.0), transform: Transform::similarity(1.001, 0.25f64.to_radians(), cx, cy, 12.0, -6.5), ..ShotSpec::new(4.0, 3) },
     ];
     for (i, s) in specs.iter().enumerate() {
+        let s = &ShotSpec { mover: walk(i), ..s.clone() };
         let t = std::time::Instant::now();
         let p = dir.join(format!("BRK_{i}.dng"));
         common::write_dng(&p, &scene, s, w, h);
@@ -71,7 +75,7 @@ fn peak_heap_of_a_24mp_merge() {
         let p = counting::PEAK.swap(counting::LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
         eprintln!("{what}: peak {:.0} MB, live {:.0} MB", p as f64 / 1e6, counting::LIVE.load(Ordering::Relaxed) as f64 / 1e6);
     };
-    let opts = merge::MergeOptions::default();
+    let opts = merge::MergeOptions { deghost: merge::Deghost::High, ..merge::MergeOptions::default() };
     let ctl = merge::Control::default();
     let prepared = merge::prepare(sources, &opts, &ctl).unwrap();
     peak("pass 1");
