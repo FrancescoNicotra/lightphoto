@@ -1,0 +1,15 @@
+[package]
+name = "calibrate"
+description = "Calibration bench: each slider against its own Lightroom export (mean ΔE2000 at 480 px)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+raw.workspace = true
+xmp.workspace = true
+pipeline.workspace = true
+export.workspace = true
+rayon.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

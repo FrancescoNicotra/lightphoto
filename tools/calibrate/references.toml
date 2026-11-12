@@ -1,0 +1,302 @@
+# Lightroom references for the calibration bench (tools/calibrate).
+# How to make the missing exports: docs/calibration.md.
+#
+# Paths are relative to the samples root (samples/, or $LUMEN_SAMPLES).
+# Every entry starts from Camera Raw's defaults for its kind of source
+# (no sharpening or colour noise reduction on a JPEG), then applies the
+# preset, then `settings` (crs: keys without the prefix).
+# Entries whose files are missing are skipped with a warning.
+
+size = 480         # long edge of the comparison, pixels
+max_delta_e = 3.0  # default threshold on the mean ΔE2000; provisional for
+                   # the entries not measured yet: tighten once measured
+
+[[reference]]
+name = "dreamy"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+preset = "Dreamy days in spring.xmp"
+reference = "pixls/P1010041-camera-lightroom-dreamy.jpg"
+max_delta_e = 3.0
+note = "Lightroom 12 for iOS, the whole preset (grain included), sRGB JPEG at full size"
+
+# --- One slider at a time, on the camera JPEG of the GX80. ---------------
+# Lightroom for iOS (free), grain 0, exported as described in
+# docs/calibration.md into samples/pixls/lightroom/.
+
+[[reference]]
+name = "original"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+reference = "pixls/lightroom/P1010041-original.jpg"
+max_delta_e = 1.0
+note = "no edits: measures Lightroom's own JPEG round trip, the floor of every other entry"
+
+# Light
+
+[[reference]]
+name = "exposure-m100"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Exposure2012 = -1.0 }
+reference = "pixls/lightroom/P1010041-exposure-m100.jpg"
+
+[[reference]]
+name = "exposure-p100"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Exposure2012 = +1.0 }
+reference = "pixls/lightroom/P1010041-exposure-p100.jpg"
+
+[[reference]]
+name = "contrast-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Contrast2012 = -50 }
+reference = "pixls/lightroom/P1010041-contrast-m50.jpg"
+
+[[reference]]
+name = "contrast-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Contrast2012 = +50 }
+reference = "pixls/lightroom/P1010041-contrast-p50.jpg"
+
+[[reference]]
+name = "highlights-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Highlights2012 = -50 }
+reference = "pixls/lightroom/P1010041-highlights-m50.jpg"
+
+[[reference]]
+name = "highlights-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Highlights2012 = +50 }
+reference = "pixls/lightroom/P1010041-highlights-p50.jpg"
+
+[[reference]]
+name = "shadows-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Shadows2012 = -50 }
+reference = "pixls/lightroom/P1010041-shadows-m50.jpg"
+
+[[reference]]
+name = "shadows-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Shadows2012 = +50 }
+reference = "pixls/lightroom/P1010041-shadows-p50.jpg"
+
+[[reference]]
+name = "whites-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Whites2012 = -50 }
+reference = "pixls/lightroom/P1010041-whites-m50.jpg"
+
+[[reference]]
+name = "whites-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Whites2012 = +50 }
+reference = "pixls/lightroom/P1010041-whites-p50.jpg"
+
+[[reference]]
+name = "blacks-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Blacks2012 = -50 }
+reference = "pixls/lightroom/P1010041-blacks-m50.jpg"
+
+[[reference]]
+name = "blacks-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Blacks2012 = +50 }
+reference = "pixls/lightroom/P1010041-blacks-p50.jpg"
+
+# Colour
+
+[[reference]]
+name = "temperature-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { IncrementalTemperature = +50 }
+reference = "pixls/lightroom/P1010041-temperature-p50.jpg"
+
+[[reference]]
+name = "tint-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { IncrementalTint = +50 }
+reference = "pixls/lightroom/P1010041-tint-p50.jpg"
+
+[[reference]]
+name = "vibrance-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Vibrance = +50 }
+reference = "pixls/lightroom/P1010041-vibrance-p50.jpg"
+
+[[reference]]
+name = "saturation-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Saturation = -50 }
+reference = "pixls/lightroom/P1010041-saturation-m50.jpg"
+
+# Colour mix (HSL)
+
+[[reference]]
+name = "green-hue-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { HueAdjustmentGreen = -50 }
+reference = "pixls/lightroom/P1010041-green-hue-m50.jpg"
+
+[[reference]]
+name = "green-hue-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { HueAdjustmentGreen = +50 }
+reference = "pixls/lightroom/P1010041-green-hue-p50.jpg"
+
+[[reference]]
+name = "green-sat-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SaturationAdjustmentGreen = -50 }
+reference = "pixls/lightroom/P1010041-green-sat-m50.jpg"
+
+[[reference]]
+name = "green-sat-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SaturationAdjustmentGreen = +50 }
+reference = "pixls/lightroom/P1010041-green-sat-p50.jpg"
+
+[[reference]]
+name = "green-lum-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { LuminanceAdjustmentGreen = -50 }
+reference = "pixls/lightroom/P1010041-green-lum-m50.jpg"
+
+[[reference]]
+name = "green-lum-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { LuminanceAdjustmentGreen = +50 }
+reference = "pixls/lightroom/P1010041-green-lum-p50.jpg"
+
+[[reference]]
+name = "yellow-hue-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { HueAdjustmentYellow = -50 }
+reference = "pixls/lightroom/P1010041-yellow-hue-m50.jpg"
+
+[[reference]]
+name = "yellow-hue-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { HueAdjustmentYellow = +50 }
+reference = "pixls/lightroom/P1010041-yellow-hue-p50.jpg"
+
+[[reference]]
+name = "yellow-sat-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SaturationAdjustmentYellow = -50 }
+reference = "pixls/lightroom/P1010041-yellow-sat-m50.jpg"
+
+[[reference]]
+name = "yellow-sat-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SaturationAdjustmentYellow = +50 }
+reference = "pixls/lightroom/P1010041-yellow-sat-p50.jpg"
+
+[[reference]]
+name = "yellow-lum-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { LuminanceAdjustmentYellow = -50 }
+reference = "pixls/lightroom/P1010041-yellow-lum-m50.jpg"
+
+[[reference]]
+name = "yellow-lum-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { LuminanceAdjustmentYellow = +50 }
+reference = "pixls/lightroom/P1010041-yellow-lum-p50.jpg"
+
+# Colour grading
+
+[[reference]]
+name = "grade-midtones"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { ColorGradeMidtoneHue = 60, ColorGradeMidtoneSat = 50 }
+reference = "pixls/lightroom/P1010041-grade-midtones.jpg"
+
+[[reference]]
+name = "grade-shadows"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SplitToningShadowHue = 220, SplitToningShadowSaturation = 50 }
+reference = "pixls/lightroom/P1010041-grade-shadows.jpg"
+
+[[reference]]
+name = "grade-highlights"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { SplitToningHighlightHue = 40, SplitToningHighlightSaturation = 50 }
+reference = "pixls/lightroom/P1010041-grade-highlights.jpg"
+
+# Effects
+
+[[reference]]
+name = "texture-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Texture = -50 }
+reference = "pixls/lightroom/P1010041-texture-m50.jpg"
+
+[[reference]]
+name = "texture-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Texture = +50 }
+reference = "pixls/lightroom/P1010041-texture-p50.jpg"
+
+[[reference]]
+name = "clarity-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Clarity2012 = -50 }
+reference = "pixls/lightroom/P1010041-clarity-m50.jpg"
+
+[[reference]]
+name = "clarity-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Clarity2012 = +50 }
+reference = "pixls/lightroom/P1010041-clarity-p50.jpg"
+
+[[reference]]
+name = "dehaze-m50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Dehaze = -50 }
+reference = "pixls/lightroom/P1010041-dehaze-m50.jpg"
+
+[[reference]]
+name = "dehaze-p50"
+source = "pixls/P1010041-camera.jpg"
+kind = "jpeg"
+settings = { Dehaze = +50 }
+reference = "pixls/lightroom/P1010041-dehaze-p50.jpg"
