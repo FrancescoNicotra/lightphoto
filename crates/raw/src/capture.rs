@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use crate::color::Vec3;
 use crate::decode::{color_profile, DngTags};
 use crate::demosaic::{self, Cfa};
-use crate::rcd;
+use crate::{highlights, rcd};
 use crate::image::{Image, Orientation};
 use crate::profile::ColorProfile;
 use crate::{CameraData, ColorSource, DecodeOptions, Error, Photo, PhotoInfo, RawInfo};
@@ -201,7 +201,11 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool, gains: [f32
             if cfa.colors.iter().any(|&c| c > 2) || cfa.width == 0 {
                 return Err(Error::Unsupported(format!("colour filter pattern {:?}", cfg.cfa.name)));
             }
-            let mosaic: Vec<f32> = (0..w * h).into_par_iter().map(|i| normalise(i % w, i / w, 0)).collect();
+            let mut mosaic: Vec<f32> = (0..w * h).into_par_iter().map(|i| normalise(i % w, i / w, 0)).collect();
+            // Not for HDR merges: they rely on the clipped samples as such.
+            if !with_mask && !float {
+                highlights::reconstruct_mosaic(&mut mosaic, w, h, &cfa, gains);
+            }
             let [cx, cy, cw, ch] = crop;
             if half {
                 // Align the crop to the 2×2 cells so they stay whole.
@@ -235,7 +239,10 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool, gains: [f32
                     [normalise(x, y, 0); 3]
                 }
             });
-            let img = img.crop(crop[0], crop[1], crop[2], crop[3]);
+            let mut img = img.crop(crop[0], crop[1], crop[2], crop[3]);
+            if !with_mask && !float && cpp >= 3 {
+                highlights::reconstruct_rgb(&mut img, gains);
+            }
             let img = if half { img.downscale(img.width.max(img.height) / 2) } else { img };
             let clipped = if with_mask {
                 img.pixels.par_iter().map(|p| u8::from(p.iter().any(|&c| c >= CLIP_MASK))).collect()

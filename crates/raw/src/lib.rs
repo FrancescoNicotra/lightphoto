@@ -4,8 +4,8 @@
 //! applies the DNG colour model with a chosen white balance:
 //!
 //! ```text
-//! file ─rawler→ mosaic ─black/white→ 0..1 ─demosaic→ camera RGB ─crop→ Capture ─orient→ Photo
-//! Photo::to_working(white) ─WB + clip→ ─camera→XYZ D50 (DNG maths)→ ProPhoto linear
+//! file ─rawler→ mosaic ─black/white→ 0..1 ─highlights→ ─demosaic→ camera RGB ─crop→ Capture ─orient→ Photo
+//! Photo::to_working(white) ─WB→ ─camera→XYZ D50 (DNG maths)→ ProPhoto linear
 //! ```
 //!
 //! [`dng_write`] goes the other way: linear camera RGB (an HDR merge) to a
@@ -17,6 +17,7 @@ pub mod dcp;
 mod decode;
 pub mod demosaic;
 pub mod dng_write;
+pub mod highlights;
 pub mod hue_sat;
 pub mod image;
 pub mod profile;
@@ -127,7 +128,8 @@ pub struct RawInfo {
     pub as_shot_white: Xy,
 }
 
-/// Raw channel value above which a photosite is treated as clipped.
+/// Raw channel value above which a sample of merged HDR data is treated as
+/// clipped.
 const CLIP: f32 = 0.995;
 
 impl Photo {
@@ -161,8 +163,9 @@ impl Photo {
     }
 
     /// Linear ProPhoto RGB with the given white balance (as shot if `None`).
-    /// Scene white maps to (1, 1, 1) when it is just at the clip point; pixels
-    /// with a clipped channel are clipped to white so highlights stay neutral.
+    /// Scene white maps to (1, 1, 1) when it is just at the clip point.
+    /// Reconstructed highlights go above it; pixels where every channel
+    /// clipped are made neutral (see [`highlights`]).
     pub fn to_working(&self, white: Option<Xy>) -> Image {
         let mut out = self.data.clone();
         self.working_in_place(&mut out, white);
@@ -185,16 +188,20 @@ impl Photo {
         let to_pcs = color::mul(&cam.profile.camera_to_xyz_d50(white), &color::diag(neutral));
         let m = color::to_f32(&color::mul(&color::xyz_to_prophoto(), &to_pcs));
 
+        // Merged HDR data has no reconstruction: a clipped channel clips the
+        // pixel to white. Otherwise the clipped channels were reconstructed
+        // at decoding, and only pixels where all of them clipped are left:
+        // made neutral, at the level of the brightest.
+        let float = self.info.raw.as_ref().is_some_and(|r| r.float);
         out.map(|p| {
-            let clipped = p.iter().any(|&c| c >= CLIP);
-            let balanced: [f32; 3] = std::array::from_fn(|c| {
-                let v = p[c] * gains[c];
-                if clipped {
-                    v.min(1.0)
-                } else {
-                    v
+            let mut balanced: [f32; 3] = std::array::from_fn(|c| p[c] * gains[c]);
+            if float {
+                if p.iter().any(|&c| c >= CLIP) {
+                    balanced = balanced.map(|v| v.min(1.0));
                 }
-            });
+            } else if p.iter().all(|&c| c >= highlights::CLIP) {
+                balanced = [balanced[0].max(balanced[1]).max(balanced[2]); 3];
+            }
             color::apply(&m, balanced)
         });
     }

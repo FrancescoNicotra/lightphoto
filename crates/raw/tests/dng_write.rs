@@ -237,8 +237,31 @@ fn single_frame_merge_develops_like_the_original() {
     assert_eq!((x.width, x.height), (y.width, y.height));
     let to_xyz = color::to_f32(&color::prophoto_to_xyz());
     let lab = |p| color::to_lab(color::apply(&to_xyz, p));
-    let worst = x.pixels.iter().zip(&y.pixels).map(|(&p, &q)| color::delta_e2000(lab(p), lab(q))).fold(0.0, f32::max);
-    assert!(worst < 0.5, "max ΔE2000 {worst}");
+    // Identical outside the clipping mask (oriented like the photos). Inside
+    // it the original's highlights are reconstructed and a merge's are not:
+    // neutral above the clip point in the blown columns, and no colour fringe
+    // at their edge, where the red channel, clipping higher after white
+    // balance, used to bleed into the grey (it still does in the merge).
+    // Within 8 photosites of the sensor's edge RCD falls back to bilinear,
+    // which makes its own fringe on a step this sharp: not checked.
+    let oriented = |f: &(dyn Fn(usize, usize) -> bool + Sync)| Image::from_fn(cw, ch, |x, y| [f32::from(u8::from(f(x, y))); 3]).oriented(original.info.orientation);
+    let mask = oriented(&|x, y| capture.clipped[y * cw + x] == 1);
+    let rcd = oriented(&|x, y| {
+        let (sx, sy) = (x + CROP[0] as usize, y + CROP[1] as usize);
+        sx >= 8 && sy >= 8 && sx + 8 < SIZE.0 && sy + 8 < SIZE.1
+    });
+    let mut worst = 0.0f32;
+    for (i, (&p, &q)) in x.pixels.iter().zip(&y.pixels).enumerate() {
+        if mask.pixels[i][0] == 0.0 {
+            worst = worst.max(color::delta_e2000(lab(p), lab(q)));
+        } else if rcd.pixels[i][0] == 1.0 {
+            let (lo, hi) = (p[0].min(p[1]).min(p[2]), p[0].max(p[1]).max(p[2]));
+            assert!(hi - lo < 0.02 * hi, "pixel {i}: {p:?}");
+        }
+    }
+    // Not 0.5 any more: RCD's block means include the blown columns, which
+    // differ between the two, and shift the grey a little (0.42 measured).
+    assert!(worst < 0.6, "max ΔE2000 {worst}");
 }
 
 /// Floating point DNGs from other writers may omit WhiteLevel (rawler then

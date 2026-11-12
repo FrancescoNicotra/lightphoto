@@ -11,7 +11,7 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 | 1b | **Camera profile HueSatMap** | linear ProPhoto | only with an Adobe DCP (see below), interpolated between the two illuminants like the matrices |
 | 2 | **Calibration** | linear 3×3 matrix | each Rec.709 primary rotated in hue (±100 ≈ ±25°) and scaled in saturation; white stays white |
 | 3 | **Exposure** | linear | `Exposure2012` + the DNG `BaselineExposure` |
-| 4 | **Shoulder** (raw only) | linear | identity up to 0.7, then `tanh`: highlights above clipping stay recoverable |
+| 4 | **Shoulder** (raw only) | linear | identity up to 0.7, then `tanh`: highlights above clipping (reconstructed at decoding, see below) stay recoverable |
 | 4b | **LookTable** | linear ProPhoto | the Look's (e.g. Adobe Color), otherwise the DCP's |
 | 5 | **Profile curve** | linear / Melissa* | raw only: the DCP `ProfileToneCurve` or, when missing (as in Adobe Standard, or without a DCP), the DNG SDK default **ACR3** curve ([`acr3.rs`](../crates/pipeline/src/acr3.rs)); applied in linear with the SDK's hue-preserving "RGB tone" method. Then the Look's curve (Adobe Color: a gentle S) |
 | 6 | **Profile RGB table** | declared primaries and gamma | `crs:RGBTable` of creative profiles, with Amount |
@@ -41,6 +41,18 @@ Full-size Bayer decodes use **RCD** (Ratio Corrected Demosaicing, Luis Sanz Rodr
 - Its ratio estimates are not mean-preserving in fine texture (about 1% per channel in foliage): interpolated values are rescaled block by block (64 px, blended) to the mean of the real photosites of their colour.
 - Output is clamped to the largest photosite in its 5×5 neighbourhood: next to blown highlights RCD would otherwise overshoot past the sensor's clip and those pixels would be treated as clipped.
 - Measured by mosaicing the camera's JPEG and rebuilding it (`crates/raw/tests/demosaic_quality.rs`): bilinear 22.4 dB, Malvar–He–Cutler 25.0 dB, RCD 25.9 dB PSNR; channel means within 0.3% of the truth. Cost at 16 MP: about 170 ms more decoding (tiles of 256 px, one band at a time, about 40 MB extra memory).
+
+## Highlight reconstruction
+
+Before the demosaic, photosites at or above 0.98 of the white level are estimated from the colours that did not clip ([`crates/raw/src/highlights.rs`](../crates/raw/src/highlights.rs)), on data scaled by the as-shot white balance. The idea is darktable's "inpaint opposed"; two of its choices made bright skies magenta and are changed:
+
+- A clipped colour is estimated from each **other colour whose 3×3 neighbourhood has no clipped sample**, times a ratio between the two colours; two estimates are combined on cube roots. darktable averages both other colours even when one of them clipped too, so where green and blue clip together the clipped blue drags green below red and blue.
+- The ratios are **local**: summed per 16 px cell next to the clipped areas (over unclipped samples above 20% of the clip point), and spread into the clipped areas from coarser levels (push-pull, a cell's own ratio weighed against its surroundings' by 256 samples). darktable keeps one offset per colour for the whole image; an offset also falls short as a colour gets brighter, a ratio does not.
+- With no usable colour around, a sample is made neutral at the brightest clipped sample near it; afterwards `Photo::to_working` makes pixels where every channel clipped neutral again with the chosen white balance. Left at their clip levels, a green next to a red that clips higher (after white balance) draws a magenta or yellow outline around blown areas.
+- A sample only goes up (a clipped value is a lower bound). Values above 1.0 go through the raw shoulder of the tone stage: at default settings the result looks as before (blown areas are a cleaner white), and negative Exposure or Highlights now shows the reconstructed sky instead of flat grey.
+- Not for HDR merges (they handle clipped shots themselves, and their floating point DNGs clip a pixel to white as before) nor for merge inputs.
+
+Measured (`crates/raw/tests/highlights_quality.rs`), by overexposing the camera JPEG and clipping it as a sensor would: mean error on the clipped samples 0.24 EV instead of 0.39 at +1 EV, 0.33 instead of 0.55 at +2 EV (darktable's global offset: 0.26 and 0.42). What is left is mostly foliage texture, where the pixels that clipped are those greener than their neighbours. On the GX80 RW2's sky, 1–4% of the partly clipped pixels lean magenta, against 70% of the raw values. Cost: about 20–25 ms per decode at 16 MP.
 
 ## Speed and memory
 

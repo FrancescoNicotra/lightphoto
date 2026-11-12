@@ -14,6 +14,15 @@ fn assert_rgb(p: [f32; 3], expected: f32, eps: f32, what: &str) {
     assert!(p.iter().all(|c| (c - expected).abs() < eps), "{what}: {p:?}, expected {expected}");
 }
 
+/// Where every photosite is at the white level, the highlights are
+/// reconstructed as neutral at the brightest of them after white balance:
+/// the white level times the largest gain (1 / the smallest neutral). At
+/// full size RCD's block means (taken across the step from grey to white)
+/// move it by a few tenths of a percent.
+fn blown(neutral: [f64; 3]) -> f32 {
+    (1.0 / neutral.iter().copied().fold(f64::INFINITY, f64::min)) as f32
+}
+
 #[test]
 fn develops_synthetic_dng() {
     let (path, neutral) = write_dng("synthetic.dng", SIZE);
@@ -35,7 +44,7 @@ fn develops_synthetic_dng() {
     // After rotation, output row y comes from sensor column CROP.x + y.
     let img = photo.to_working(None);
     assert_rgb(img.get(20, 5), GREY as f32, 2e-3, "grey card");
-    assert_rgb(img.get(20, 50), 1.0, 1e-3, "clipped highlight");
+    assert_rgb(img.get(20, 50), blown(neutral), 0.01 * blown(neutral), "clipped highlight");
 
     // A cooler white balance than as-shot makes the grey card warm.
     let warm = photo.to_working(Some(TempTint { temperature: 6500.0, tint: 0.0 }.to_xy())).get(20, 5);
@@ -46,12 +55,12 @@ fn develops_synthetic_dng() {
 
 #[test]
 fn half_size_matches_full_size() {
-    let (path, _) = write_dng("synthetic-half.dng", SIZE);
+    let (path, neutral) = write_dng("synthetic-half.dng", SIZE);
     let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
     assert_eq!((photo.data.width, photo.data.height), (20, 28));
     let img = photo.to_working(None);
     assert_rgb(img.get(10, 3), GREY as f32, 2e-3, "grey card");
-    assert_rgb(img.get(10, 25), 1.0, 1e-3, "clipped highlight");
+    assert_rgb(img.get(10, 25), blown(neutral), 2e-3, "clipped highlight");
 }
 
 #[test]
