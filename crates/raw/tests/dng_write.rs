@@ -204,13 +204,15 @@ fn single_frame_merge_develops_like_the_original() {
     let (source, _) = write_dng("single-frame-source.dng", SIZE);
     let capture = load_capture(&source, &DecodeOptions::default()).unwrap();
 
-    // The mask: sensor columns ≥ 32 are blown out; the 3×3 support reaches
-    // one column further left. Crop x = sensor x − 2.
+    // The mask: sensor columns ≥ 32 are blown out; the demosaic's support
+    // (raw::rcd::SUPPORT_RADIUS) reaches that many columns further left.
+    // Crop x = sensor x − 2.
     let (cw, ch) = (CROP[2] as usize, CROP[3] as usize);
     assert_eq!((capture.data.width, capture.data.height), (cw, ch));
+    let first = 30 - raw::rcd::SUPPORT_RADIUS;
     for y in 0..ch {
         for x in 0..cw {
-            assert_eq!(capture.clipped[y * cw + x], u8::from(x >= 29), "({x}, {y})");
+            assert_eq!(capture.clipped[y * cw + x], u8::from(x >= first), "({x}, {y})");
         }
     }
     let half = load_capture(&source, &DecodeOptions { half_size: true }).unwrap();

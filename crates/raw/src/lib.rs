@@ -20,6 +20,7 @@ pub mod dng_write;
 pub mod hue_sat;
 pub mod image;
 pub mod profile;
+pub mod rcd;
 
 use std::path::Path;
 

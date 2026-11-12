@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use crate::color::Vec3;
 use crate::decode::{color_profile, DngTags};
 use crate::demosaic::{self, Cfa};
+use crate::rcd;
 use crate::image::{Image, Orientation};
 use crate::profile::ColorProfile;
 use crate::{CameraData, ColorSource, DecodeOptions, Error, Photo, PhotoInfo, RawInfo};
@@ -88,7 +89,9 @@ pub(crate) fn capture(path: &Path, opts: &DecodeOptions, with_mask: bool) -> Res
     let dng = DngTags::read(decoder.as_ref());
 
     let (profile, neutral) = color_profile(&raw, dng.as_ref())?;
-    let sensor = sensor_to_camera_rgb(&raw, opts.half_size, with_mask)?;
+    // As-shot white balance gains (max neutral 1 → gains ≥ 1), for RCD.
+    let gains = neutral.map(|n| (1.0 / n.max(1e-6)) as f32);
+    let sensor = sensor_to_camera_rgb(&raw, opts.half_size, with_mask, gains)?;
 
     let exif_orientation = meta.as_ref().and_then(|m| m.exif.orientation);
     let orientation = match raw.orientation.to_u16() {
@@ -153,7 +156,7 @@ struct Sensor {
 
 /// Black/white normalisation, demosaic and crop, plus the clipping mask if
 /// asked for. Returns camera RGB where 1.0 is the clip point of each channel.
-fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<Sensor, Error> {
+fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool, gains: [f32; 3]) -> Result<Sensor, Error> {
     let (w, h) = (raw.width, raw.height);
     let area = raw.crop_area.or(raw.active_area);
     let crop = area.map_or([0, 0, w, h], |r| [r.p.x, r.p.y, r.d.w, r.d.h]);
@@ -212,9 +215,12 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
                     return Ok(sensor(img, clipped, cfa.name()));
                 }
             }
-            let img = demosaic::bilinear_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch]);
+            // RCD for Bayer sensors, bilinear for anything else (X-Trans).
+            let (img, r) = match rcd::rcd_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch], gains) {
+                Some(img) => (img, rcd::SUPPORT_RADIUS),
+                None => (demosaic::bilinear_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch]), demosaic::support_radius(&cfa)),
+            };
             let clipped = if with_mask {
-                let r = demosaic::support_radius(&cfa);
                 dilated_mask(&mosaic, w, h, Grid { origin: [cx, cy], size: (img.width, img.height), step: 1, before: r, after: r })
             } else {
                 Vec::new()

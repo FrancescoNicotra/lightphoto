@@ -33,6 +33,15 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 
 \* *Melissa* = ProPhoto primaries with the sRGB transfer curve, the space of Lightroom's curves and RGB readouts.
 
+## Demosaicing
+
+Full-size Bayer decodes use **RCD** (Ratio Corrected Demosaicing, Luis Sanz Rodríguez, v2.3, as in RawTherapee and darktable; [`crates/raw/src/rcd.rs`](../crates/raw/src/rcd.rs)); X-Trans and other patterns, and the few photosites at the sensor border, use bilinear interpolation; half-size previews bin 2×2 cells.
+
+- RCD runs on data scaled by the as-shot white balance and scaled back afterwards: it assumes small differences between channels, which raw camera values do not have (without it the photo's mean colour moved by about 5%).
+- Its ratio estimates are not mean-preserving in fine texture (about 1% per channel in foliage): interpolated values are rescaled block by block (64 px, blended) to the mean of the real photosites of their colour.
+- Output is clamped to the largest photosite in its 5×5 neighbourhood: next to blown highlights RCD would otherwise overshoot past the sensor's clip and those pixels would be treated as clipped.
+- Measured by mosaicing the camera's JPEG and rebuilding it (`crates/raw/tests/demosaic_quality.rs`): bilinear 22.4 dB, Malvar–He–Cutler 25.0 dB, RCD 25.9 dB PSNR; channel means within 0.3% of the truth. Cost at 16 MP: about 170 ms more decoding (tiles of 256 px, one band at a time, about 40 MB extra memory).
+
 ## Speed and memory
 
 - **Stage cache** (`pipeline::stages`): `Pipeline::render_cached` keeps four stages (working image, tone, spatial filters, colour), each with the settings it was computed from, and redoes only the stages whose settings changed. The photo is recognised by its pixel buffer, size, a sample of its pixels and its colour data, so a new photo or a swapped camera profile is never served from the cache. A cached render is bit-identical to an uncached one (tested).
