@@ -1,0 +1,7 @@
+[package]
+name = "test-samples"
+description = "Paths of the sample photos for the tests: the full files in samples/pixls when present, else the small versioned crops in samples/ci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false

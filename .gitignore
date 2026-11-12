@@ -5,7 +5,7 @@
 # Sample RAW files are large and carry camera serial numbers
 /samples/*.dng
 /samples/*.DNG
-/samples/pixls/
+/samples/pixls
 
 # Working notes and plans, kept out of the repository
 /plan/

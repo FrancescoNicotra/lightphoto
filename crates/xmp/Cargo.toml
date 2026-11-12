@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 roxmltree.workspace = true
 flate2.workspace = true
+
+[dev-dependencies]
+test-samples.workspace = true

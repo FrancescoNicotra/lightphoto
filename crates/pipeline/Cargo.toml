@@ -10,3 +10,6 @@ xmp.workspace = true
 lut.workspace = true
 raw.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+test-samples.workspace = true

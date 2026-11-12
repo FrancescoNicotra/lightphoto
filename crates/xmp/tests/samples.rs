@@ -1,18 +1,11 @@
 //! Tests against the "Dreamy days in spring" preset in /samples.
 
-use std::path::PathBuf;
-
+use test_samples::{optional, require};
 use xmp::{Curve, DevelopSettings, Preset, RgbTable, WhiteBalance, XmpPacket};
 
-fn sample(name: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples").join(name);
-    p.exists().then_some(p).or_else(|| {
-        eprintln!("skipping: {name} not found in samples/");
-        None
-    })
-}
-
 const XMP: &str = "Dreamy days in spring.xmp";
+/// Lightroom mobile's DNG with the preset applied: not versioned (it carries
+/// the camera's serial number), skipped when missing.
 const DNG: &str = "Dreamy days in spring - mobile version.dng";
 
 fn curve(pts: &[(f32, f32)]) -> Curve {
@@ -21,7 +14,7 @@ fn curve(pts: &[(f32, f32)]) -> Curve {
 
 #[test]
 fn reads_every_panel_of_the_xmp_preset() {
-    let Some(path) = sample(XMP) else { return };
+    let path = require(XMP);
     let p = Preset::load(path).unwrap();
     assert_eq!(p.name.as_deref(), Some("Dreamy days in spring"));
     assert_eq!(p.preset_type.as_deref(), Some("Normal"));
@@ -66,7 +59,8 @@ fn reads_every_panel_of_the_xmp_preset() {
 
 #[test]
 fn dng_mobile_preset_matches_xmp_and_exposes_adobe_color() {
-    let (Some(xmp), Some(dng)) = (sample(XMP), sample(DNG)) else { return };
+    let Some(dng) = optional(DNG) else { return };
+    let xmp = require(XMP);
     let from_xmp = Preset::load(xmp).unwrap().settings;
     let from_dng = Preset::load(dng).unwrap().settings;
 
@@ -87,7 +81,7 @@ fn dng_mobile_preset_matches_xmp_and_exposes_adobe_color() {
 
 #[test]
 fn xml_round_trip_is_lossless() {
-    let Some(path) = sample(XMP) else { return };
+    let path = require(XMP);
     let original = Preset::load(path).unwrap().packet;
     let written = original.to_xml();
     let reparsed = XmpPacket::parse(&written).unwrap();
@@ -96,7 +90,7 @@ fn xml_round_trip_is_lossless() {
 
 #[test]
 fn typed_settings_survive_write_into() {
-    let Some(path) = sample(XMP) else { return };
+    let path = require(XMP);
     let s = Preset::load(path).unwrap().settings;
     let mut packet = XmpPacket::default();
     s.write_into(&mut packet.props);

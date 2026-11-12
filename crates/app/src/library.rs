@@ -208,8 +208,7 @@ mod tests {
 
     #[test]
     fn finds_the_sample_preset() {
-        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples"));
-        let presets = scan_presets(dir);
+        let presets = scan_presets(&test_samples::dir());
         let dreamy = presets.iter().find(|p| p.path.ends_with("Dreamy days in spring.xmp")).expect("sample preset");
         assert!(matches!(dreamy.kind, PresetKind::Develop(_)));
         assert!(!dreamy.name.is_empty());
@@ -217,14 +216,9 @@ mod tests {
 
     #[test]
     fn recognises_lightroom_exports() {
-        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/pixls"));
-        let lr = dir.join("P1010041-camera-lightroom-dreamy.jpg");
-        if !lr.exists() {
-            eprintln!("skipping: {} not found", lr.display());
-            return;
-        }
-        assert!(creator_tool(&lr).is_some_and(|t| t.contains("Lightroom")));
-        assert_eq!(creator_tool(&dir.join("P1010041-camera.jpg")), None);
+        let sample = test_samples::gx80();
+        assert!(creator_tool(&sample.lightroom_dreamy).is_some_and(|t| t.contains("Lightroom")));
+        assert_eq!(creator_tool(&sample.camera_jpeg), None);
     }
 
     #[test]

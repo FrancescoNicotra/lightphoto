@@ -92,7 +92,25 @@ cargo run --release -p xmp-dump  -- preset.xmp                           # what 
 cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # ΔE2000 against a reference
 ```
 
-`cargo test` runs the tests. Some use the CC0 sample raw file from https://raw.pixls.us/data/Panasonic/DMC-GX80/P1010041.RW2, saved in `samples/pixls/`; they are skipped when it is missing.
+## Tests and CI
+
+```bash
+cargo test --workspace                                   # all tests
+cargo clippy --workspace --all-targets -- -D warnings    # lints, as in CI
+```
+
+The tests on real photos use one sample, the Panasonic GX80 RAW [P1010041.RW2](https://raw.pixls.us/data/Panasonic/DMC-GX80/P1010041.RW2) from raw.pixls.us (CC0), in two versions:
+
+| Folder | Versioned | Content |
+|---|---|---|
+| `samples/ci/` | yes (~1.5 MB) | a 1024 × 768 crop of the RW2 as a Bayer DNG (the photosites unchanged), the same region of the camera JPEG and of Lightroom's render of it with the "Dreamy days in spring" preset |
+| `samples/pixls/` | no | the full files: `P1010041.RW2`, `P1010041-camera.jpg` (its embedded JPEG), `P1010041-camera-lightroom-dreamy.jpg` |
+
+The tests use the full files when `samples/pixls/` has them and the crops otherwise; the expected values (sizes, ΔE limits) depend on the version. `LUMEN_SAMPLES=ci` or `LUMEN_SAMPLES=full` forces one. A missing sample of the chosen version is a failure, not a skip. The paths are in the `test-samples` crate, and `cargo run -p raw --example make_ci_samples` rebuilds `samples/ci/` from `samples/pixls/` (see [samples/ci/README.md](samples/ci/README.md)).
+
+A few tests still skip, by design, when what they need cannot be in the repository: those on Adobe's installed profiles (no Lightroom or Camera Raw on the machine), those on `Dreamy days in spring - mobile version.dng` (a Lightroom mobile DNG with the camera's serial number), and the check that the crop has the same photosites as the RW2 (needs `samples/pixls/`).
+
+[GitHub Actions](.github/workflows/ci.yml) runs build, tests (with `LUMEN_SAMPLES=ci`) and Clippy on every push, on macOS (Apple Silicon) and on Windows (x86_64, MSVC), with Cargo's cache. It can also be started by hand from the Actions tab.
 
 ## Project layout
 
@@ -106,7 +124,9 @@ cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # Δ
 | `crates/export` | resizing and JPEG/PNG/TIFF encoding with colour profile and EXIF |
 | `crates/align` | image alignment (pyramid + ECC, translation to homography) and warping, for HDR merge ([docs/align.md](docs/align.md)) |
 | `crates/merge` | HDR merge of RAW brackets into a floating point DNG: exposures, weights, alignment, output ([docs/merge.md](docs/merge.md)) |
+| `crates/test-samples` | where the tests find the sample photos (full or versioned crops) |
 | `tools/` | `lumen-cli`, `xmp-dump`, `compare` |
+| `samples/` | the sample preset; `ci/`: small versioned photos for the tests |
 
 ## Adobe profiles
 
