@@ -90,6 +90,7 @@ cargo run --release -p lumen-cli -- dng     photo.RW2 -o photo-linear.dng # a RA
 cargo run --release -p lumen-cli -- hdr     a.RW2 b.RW2 c.RW2 --timings  # HDR merge into a-HDR.dng
 cargo run --release -p xmp-dump  -- preset.xmp                           # what a preset contains
 cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # ΔE2000 against a reference
+cargo run --release -p calibrate                                         # every slider against its Lightroom export
 ```
 
 `cargo test` runs the tests. Some use the CC0 sample raw file from https://raw.pixls.us/data/Panasonic/DMC-GX80/P1010041.RW2, saved in `samples/pixls/`; they are skipped when it is missing.
@@ -106,7 +107,7 @@ cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # Δ
 | `crates/export` | resizing and JPEG/PNG/TIFF encoding with colour profile and EXIF |
 | `crates/align` | image alignment (pyramid + ECC, translation to homography) and warping, for HDR merge ([docs/align.md](docs/align.md)) |
 | `crates/merge` | HDR merge of RAW brackets into a floating point DNG: exposures, weights, alignment, output ([docs/merge.md](docs/merge.md)) |
-| `tools/` | `lumen-cli`, `xmp-dump`, `compare` |
+| `tools/` | `lumen-cli`, `xmp-dump`, `compare`, `calibrate` (calibration bench, [docs/calibration.md](docs/calibration.md)) |
 
 ## Adobe profiles
 

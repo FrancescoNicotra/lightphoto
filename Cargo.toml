@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/xmp", "crates/lut", "crates/raw", "crates/pipeline", "crates/export", "crates/align", "crates/merge", "tools/xmp-dump", "tools/lumen-cli", "tools/compare", "crates/app"]
+members = ["crates/xmp", "crates/lut", "crates/raw", "crates/pipeline", "crates/export", "crates/align", "crates/merge", "tools/xmp-dump", "tools/lumen-cli", "tools/compare", "tools/calibrate", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"

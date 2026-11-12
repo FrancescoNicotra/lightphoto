@@ -80,7 +80,7 @@ Slider strengths were fitted to a real Lightroom render: the GX80 camera JPEG (`
 | HSL luminance ±100 → luma | ±40% | ±80% |
 | Colour grading saturation 100 → added chroma | 0.12 | 0.36 |
 
-Result: mean ΔE from 7.1 to **2.8** (test `matches_lightroom_on_the_camera_jpeg`). Limits: one image with one preset, so some constants may compensate for each other (the very weak HSL saturation, for example, could hide a colour grading or vibrance that differs from Adobe's). A robust calibration needs Lightroom exports with **one slider at a time**, which can be made for free from JPEGs. Raw files still need checking: Adobe's Highlights/Shadows are local and behave differently on high dynamic range files.
+Result: mean ΔE from 7.1 to **2.8** (test `matches_lightroom_on_the_camera_jpeg`). Limits: one image with one preset, so some constants may compensate for each other (the very weak HSL saturation, for example, could hide a colour grading or vibrance that differs from Adobe's). A robust calibration needs Lightroom exports with **one slider at a time**, which can be made for free from JPEGs. The bench for that is `tools/calibrate`: a manifest of references, one per slider, measured at 480 px ([calibration.md](calibration.md), in Italian, lists the exports to make). Raw files still need checking: Adobe's Highlights/Shadows are local and behave differently on high dynamic range files.
 
 ## Checking
 
