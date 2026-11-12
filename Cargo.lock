@@ -164,6 +164,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "align"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2196,7 +2203,9 @@ name = "lumen-cli"
 version = "0.1.0"
 dependencies = [
  "export",
+ "image",
  "lut",
+ "merge",
  "pipeline",
  "raw",
  "xmp",
@@ -2234,6 +2243,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "merge"
+version = "0.1.0"
+dependencies = [
+ "align",
+ "image",
+ "pipeline",
+ "raw",
+ "rayon",
+ "xmp",
 ]
 
 [[package]]
@@ -3190,6 +3211,7 @@ checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
 name = "raw"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "image",
  "rawler",
  "rayon",

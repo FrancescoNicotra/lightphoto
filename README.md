@@ -86,6 +86,8 @@ cargo run --release -p lumen-cli -- develop photo.dng -o out.tif --lut film.cube
 cargo run --release -p lumen-cli -- info    photo.dng
 cargo run --release -p lumen-cli -- preview photo.dng -o embedded.jpg     # the preview stored in the RAW file
 cargo run --release -p lumen-cli -- cube    preset.xmp -o preset.cube     # the point-wise part of a preset as a LUT
+cargo run --release -p lumen-cli -- dng     photo.RW2 -o photo-linear.dng # a RAW as a floating point linear DNG
+cargo run --release -p lumen-cli -- hdr     a.RW2 b.RW2 c.RW2 --timings  # HDR merge into a-HDR.dng
 cargo run --release -p xmp-dump  -- preset.xmp                           # what a preset contains
 cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # ΔE2000 against a reference
 ```
@@ -98,10 +100,12 @@ cargo run --release -p compare   -- ours.jpg lightroom.jpg --diff diff.png  # Δ
 |---|---|
 | `crates/app` | the desktop app (egui / wgpu) |
 | `crates/pipeline` | the develop pipeline that applies Camera Raw settings ([docs/pipeline.md](docs/pipeline.md)) |
-| `crates/raw` | RAW decoding (through `rawler`), demosaicing, DNG colour model |
+| `crates/raw` | RAW decoding (through `rawler`), demosaicing, DNG colour model, floating point DNG writer ([docs/linear-dng.md](docs/linear-dng.md)) |
 | `crates/xmp` | reading and writing Camera Raw XMP settings, presets and embedded tables ([docs/xmp-format.md](docs/xmp-format.md)) |
 | `crates/lut` | `.cube` / `.3dl` LUTs |
 | `crates/export` | resizing and JPEG/PNG/TIFF encoding with colour profile and EXIF |
+| `crates/align` | image alignment (pyramid + ECC, translation to homography) and warping, for HDR merge ([docs/align.md](docs/align.md)) |
+| `crates/merge` | HDR merge of RAW brackets into a floating point DNG: exposures, weights, alignment, output ([docs/merge.md](docs/merge.md)) |
 | `tools/` | `lumen-cli`, `xmp-dump`, `compare` |
 
 ## Adobe profiles

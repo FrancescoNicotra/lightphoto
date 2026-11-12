@@ -11,3 +11,5 @@ xmp.workspace = true
 lut.workspace = true
 pipeline.workspace = true
 export.workspace = true
+merge.workspace = true
+image.workspace = true

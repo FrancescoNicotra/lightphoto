@@ -9,14 +9,20 @@ use std::time::Instant;
 use export::{ExportOptions, Format, Size};
 use pipeline::adobe::{self, AdobeProfiles};
 use pipeline::{Pipeline, RenderOptions, SourceKind};
-use raw::{DecodeOptions, Photo, TempTint};
+use raw::{CameraData, ColorSource, DecodeOptions, DngEncoding, Image, LinearDng, Orientation, Photo, PhotoInfo, TempTint};
 use xmp::{DevelopSettings, Preset, WhiteBalance};
 
 const USAGE: &str = "usage:
   lumen-cli info    <photo>
   lumen-cli develop <photo>... -o <out.jpg | dir/> [options]
   lumen-cli preview <photo> -o out.jpg       (extracts the preview embedded in a RAW file)
+  lumen-cli dng     <raw> -o out.dng [--half] [--uncompressed] [--no-adobe]
+                    (rewrites a RAW as a linear floating point DNG, the format of HDR merges)
   lumen-cli cube    <preset.xmp> -o out.cube [--grid 33]
+  lumen-cli hdr     <raw> <raw>... [-o out.dng] [--no-align] [--deghost none|low|medium|high]
+                    [--auto-crop] [--uncompressed] [--timings] [--ghost-mask m.png] [--no-adobe]
+                    (merges 2–9 bracketed RAW files into a floating point DNG; without -o,
+                    <first>-HDR.dng next to the first file)
 
 develop options:
   --preset P.xmp      Lightroom/Camera Raw preset (.xmp, or a .dng/.jpg carrying one)
@@ -33,7 +39,19 @@ develop options:
   --no-adobe          do not use Adobe's camera/look profiles from a local Lightroom or
                       Camera Raw install (found automatically, or in LUMEN_ADOBE_DIR)
 
-  .jpg is 8 bit, .png/.tif 16 bit; all carry an sRGB ICC profile";
+  .jpg is 8 bit, .png/.tif 16 bit; all carry an sRGB ICC profile
+
+hdr options:
+  --no-align          do not align the shots (tripod)
+  --deghost L         ghost removal: none (default), low, medium, high
+  --ghost-mask M.png  write the ghost mask (white = single-source regions), half size, oriented
+  --auto-crop         crop (crs:Crop*, editable) to the area every aligned shot covers
+  --timings           print the time of each step
+
+dng options:
+  --half              decode at half resolution first
+  --uncompressed      32 bit floats in plain strips instead of compressed half floats (debugging)
+  --no-adobe          render the embedded preview without Adobe's profiles";
 
 #[derive(PartialEq)]
 enum Command {
@@ -41,6 +59,8 @@ enum Command {
     Develop,
     Preview,
     Cube,
+    Dng,
+    Hdr,
 }
 
 struct Args {
@@ -61,7 +81,13 @@ struct Args {
     fast: bool,
     half: bool,
     no_adobe: bool,
+    uncompressed: bool,
     grid: usize,
+    no_align: bool,
+    auto_crop: bool,
+    timings: bool,
+    deghost: merge::Deghost,
+    ghost_mask: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -71,6 +97,8 @@ fn parse_args() -> Result<Args, String> {
         Some("develop") => Command::Develop,
         Some("preview") => Command::Preview,
         Some("cube") => Command::Cube,
+        Some("dng") => Command::Dng,
+        Some("hdr") => Command::Hdr,
         Some("-h" | "--help") | None => return Err(String::new()),
         Some(c) => return Err(format!("unknown command {c:?}")),
     };
@@ -92,7 +120,13 @@ fn parse_args() -> Result<Args, String> {
         fast: false,
         half: false,
         no_adobe: false,
+        uncompressed: false,
         grid: 33,
+        no_align: false,
+        auto_crop: false,
+        timings: false,
+        deghost: merge::Deghost::None,
+        ghost_mask: None,
     };
     fn num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
         v.as_deref().and_then(|s| s.parse().ok()).ok_or(format!("{flag} needs a number"))
@@ -117,6 +151,12 @@ fn parse_args() -> Result<Args, String> {
             "--fast" => args.fast = true,
             "--half" => args.half = true,
             "--no-adobe" => args.no_adobe = true,
+            "--uncompressed" => args.uncompressed = true,
+            "--no-align" => args.no_align = true,
+            "--auto-crop" => args.auto_crop = true,
+            "--timings" => args.timings = true,
+            "--deghost" => args.deghost = value("--deghost", it.next())?.parse()?,
+            "--ghost-mask" => args.ghost_mask = Some(value("--ghost-mask", it.next())?.into()),
             "--grid" => args.grid = num::<usize>("--grid", it.next())?.clamp(2, 129),
             "-h" | "--help" => return Err(String::new()),
             _ if a.starts_with("--") => return Err(format!("unknown option {a:?}")),
@@ -126,10 +166,10 @@ fn parse_args() -> Result<Args, String> {
     if args.inputs.is_empty() {
         return Err("missing input file".into());
     }
-    if args.command != Command::Develop && args.inputs.len() > 1 {
+    if !matches!(args.command, Command::Develop | Command::Hdr) && args.inputs.len() > 1 {
         return Err("this command takes a single input".into());
     }
-    if args.command != Command::Info && args.output.is_none() {
+    if !matches!(args.command, Command::Info | Command::Hdr) && args.output.is_none() {
         return Err("missing -o <output>".into());
     }
     Ok(args)
@@ -151,6 +191,8 @@ fn main() -> ExitCode {
         Command::Develop => develop(&args),
         Command::Preview => preview(&args),
         Command::Cube => cube(&args),
+        Command::Dng => dng(&args),
+        Command::Hdr => hdr(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -334,5 +376,151 @@ fn cube(args: &Args) -> CliResult<()> {
     Pipeline::to_cube(&settings, args.grid).write_cube(out, Some(&title))?;
     println!("wrote {out:?}: {0}×{0}×{0}, sRGB in / sRGB out", args.grid);
     println!("note: white balance, Texture/Clarity/Dehaze, sharpening, noise reduction, vignette and grain are not in the LUT");
+    Ok(())
+}
+
+/// A RAW file rewritten as the DNG an HDR merge of that single frame would
+/// give: linear camera RGB in half floats, the source's colour tags and EXIF,
+/// and a preview rendered with the default settings.
+fn dng(args: &Args) -> CliResult<()> {
+    let input = &args.inputs[0];
+    let out = args.output.as_ref().unwrap();
+    let t = Instant::now();
+    let capture = raw::load_capture(input, &DecodeOptions { half_size: args.half })?;
+    let t_decode = t.elapsed();
+
+    // The preview is stored in sensor orientation, like the raw data.
+    let full_size = capture.data.width.max(capture.data.height);
+    let mut photo = Photo {
+        info: PhotoInfo { orientation: Orientation::Normal, ..capture.info.clone() },
+        data: capture.data.downscale(raw::dng_write::PREVIEW_SIZE as usize),
+        color: ColorSource::Camera(Box::new(CameraData { profile: capture.profile.clone(), as_shot_neutral: capture.as_shot_neutral })),
+    };
+    let mut settings = DevelopSettings::default();
+    let adobe_profiles = if args.no_adobe { AdobeProfiles::default() } else { AdobeProfiles::discover() };
+    let prepared = adobe::prepare(&adobe_profiles, &mut photo, &mut settings);
+    let pipeline = Pipeline::new(&settings, SourceKind::of(&photo));
+    let rendered = pipeline.render(&photo, &RenderOptions { max_size: None, full_size: Some(full_size) });
+    let preview = image::RgbImage::from_raw(rendered.width as u32, rendered.height as u32, raw::encode_srgb8(&rendered, 0.0))
+        .ok_or("preview size mismatch")?;
+    if let Some(p) = &prepared.camera_profile {
+        eprintln!("preview uses Adobe profile {}", p.display());
+    }
+    let t_preview = t.elapsed() - t_decode;
+
+    let xmp = format!(
+        r#"<?xpacket begin="{bom}" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:CreatorTool="Lumen {version}"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#,
+        bom = '\u{feff}',
+        version = env!("CARGO_PKG_VERSION")
+    );
+    let dng = LinearDng { xmp: Some(xmp.as_bytes()), preview: Some(&preview), ..LinearDng::from_capture(&capture) };
+    let encoding = if args.uncompressed { DngEncoding::F32Uncompressed } else { DngEncoding::HalfDeflate };
+    raw::write_linear_dng(out, &dng, encoding)?;
+    let t_write = t.elapsed() - t_decode - t_preview;
+
+    let bytes = std::fs::metadata(out)?.len();
+    println!(
+        "wrote {} ({} × {}, {}, {:.1} MB, {:.1} bytes/pixel) — decode {} ms, preview {} ms, write {} ms",
+        out.display(),
+        capture.data.width,
+        capture.data.height,
+        if args.uncompressed { "32 bit float" } else { "16 bit half float" },
+        bytes as f64 / 1e6,
+        bytes as f64 / (capture.data.width * capture.data.height) as f64,
+        t_decode.as_millis(),
+        t_preview.as_millis(),
+        t_write.as_millis()
+    );
+    Ok(())
+}
+
+/// Merges a bracket into a floating point HDR DNG.
+fn hdr(args: &Args) -> CliResult<()> {
+    let t = Instant::now();
+    let opts = merge::MergeOptions {
+        align: !args.no_align,
+        auto_crop: args.auto_crop,
+        deghost: args.deghost,
+        encoding: if args.uncompressed { DngEncoding::F32Uncompressed } else { DngEncoding::HalfDeflate },
+        adobe: if args.no_adobe { AdobeProfiles::default() } else { AdobeProfiles::discover() },
+    };
+    let sources = args.inputs.iter().cloned().map(merge::Source::File).collect();
+    let (merged, written) = merge::merge_hdr(sources, args.output.as_deref(), &opts, &merge::Control::default())?;
+
+    for f in &merged.frames {
+        let exif = f.exif_ev.map_or_else(|| "no EXIF".to_string(), |e| format!("EXIF {e:+.2}"));
+        let align = match &f.alignment {
+            merge::AlignStatus::Reference => "reference".to_string(),
+            merge::AlignStatus::Disabled => "not aligned".to_string(),
+            merge::AlignStatus::Failed => "alignment failed".to_string(),
+            merge::AlignStatus::Aligned { correlation, model } => {
+                let (dx, dy) = f.transform.apply(0.5, 0.5);
+                format!("aligned ({model:?}, ρ {correlation:.4}, shift {:+.1} {:+.1} px)", dx - 0.5, dy - 0.5)
+            }
+        };
+        println!("  {:<24} {:+.2} EV ({exif}, {:?}), {align}", f.name, f.ev, f.ev_source);
+    }
+    for w in &merged.warnings {
+        eprintln!("warning: {w}");
+    }
+    if let Some(g) = &merged.ghosts {
+        println!(
+            "  ghosts ({:?}): {} region(s), {:.2}% of the image, sources {:?}",
+            g.level,
+            g.regions.len(),
+            100.0 * g.motion_area(),
+            g.regions.iter().map(|r| merged.frames[r.source].name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    if let Some(path) = &args.ghost_mask {
+        let g = merged.ghosts.as_ref().ok_or("--ghost-mask needs --deghost low, medium or high")?;
+        // Grey = feathered sources, white = detected motion.
+        let img = Image::from_fn(g.width, g.height, |x, y| {
+            let i = y * g.width + x;
+            let v = if g.motion[i] { 1.0 } else { 0.6 * g.overlay[i] };
+            [v; 3]
+        })
+        .oriented(merged.orientation());
+        let grey: Vec<u8> = img.pixels.iter().map(|p| (p[0] * 255.0).round() as u8).collect();
+        image::GrayImage::from_raw(img.width as u32, img.height as u32, grey).ok_or("mask size")?.save(path)?;
+        println!("  ghost mask: {}", path.display());
+    }
+    if let Some(c) = merged.crop {
+        println!("  auto crop: left {:.3}, top {:.3}, right {:.3}, bottom {:.3}", c.left, c.top, c.right, c.bottom);
+    }
+    println!(
+        "wrote {} ({} × {}, {:.1} MB), BaselineExposure {:+.2} EV, BaselineNoise {:.2} — {} ms",
+        written.path.display(),
+        written.width,
+        written.height,
+        written.bytes as f64 / 1e6,
+        written.baseline_exposure,
+        merged.baseline_noise,
+        t.elapsed().as_millis()
+    );
+    if args.timings {
+        let tm = &merged.timings;
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        println!("timings (ms):");
+        for (name, d) in [
+            ("decode, half size", tm.decode_half),
+            ("align + warp, half size", tm.align),
+            ("exposures", tm.exposure),
+            ("ghosts", tm.ghosts),
+            ("decode, full size", tm.decode_full),
+            ("warp + accumulate", tm.accumulate),
+            ("scale + preview", tm.preview),
+            ("write", tm.write),
+        ] {
+            println!("  {name:<26}{:>8.0}", ms(d));
+        }
+        println!("  {:<26}{:>8.0}", "total", ms(tm.total()));
+    }
     Ok(())
 }

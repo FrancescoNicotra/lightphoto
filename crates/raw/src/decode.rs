@@ -5,17 +5,14 @@ use std::path::Path;
 
 use rawler::decoders::{Decoder, RawDecodeParams, WellKnownIFD};
 use rawler::formats::tiff::IFD;
-use rawler::rawimage::RawPhotometricInterpretation;
 use rawler::rawsource::RawSource;
 use rawler::tags::DngTag;
 use rawler::RawImage;
-use rayon::prelude::*;
 
 use crate::color::{self, Mat3, Vec3, Xy};
-use crate::demosaic::{self, Cfa};
 use crate::image::{Image, Orientation};
 use crate::profile::{illuminant_temperature, normalize_max, Calibration, ColorProfile};
-use crate::{CameraData, ColorSource, DecodeOptions, Error, Photo, PhotoInfo, RawInfo};
+use crate::{ColorSource, DecodeOptions, Error, Photo, PhotoInfo};
 
 /// Extensions handled by the `image` crate; everything else goes to rawler.
 const RENDERED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "webp"];
@@ -38,118 +35,11 @@ pub fn load(path: &Path, opts: &DecodeOptions) -> Result<Photo, Error> {
 // RAW
 
 fn load_raw(path: &Path, opts: &DecodeOptions) -> Result<Photo, Error> {
-    let src = RawSource::new(path)?;
-    let decoder = rawler::get_decoder(&src)?;
-    let raw = decoder.raw_image(&src, &RawDecodeParams::default(), false)?;
-    let meta = decoder.raw_metadata(&src, &RawDecodeParams::default()).ok();
-    let dng = DngTags::read(decoder.as_ref());
-
-    let (profile, neutral) = color_profile(&raw, dng.as_ref())?;
-    let (mut image, crop, cfa_name) = sensor_to_camera_rgb(&raw, opts.half_size)?;
-
-    let exif_orientation = meta.as_ref().and_then(|m| m.exif.orientation);
-    let orientation = match raw.orientation.to_u16() {
-        1 => exif_orientation.map_or(Orientation::Normal, Orientation::from_exif),
-        o => Orientation::from_exif(o),
-    };
-    image = image.oriented(orientation);
-
-    let as_shot_white = profile.neutral_to_xy(neutral);
-    let info = PhotoInfo {
-        make: raw.clean_make.clone(),
-        model: raw.clean_model.clone(),
-        lens: meta.as_ref().and_then(|m| m.lens.as_ref()).map(|l| format!("{} {}", l.lens_make, l.lens_model).trim().to_string()),
-        iso: meta.as_ref().and_then(|m| m.exif.iso_speed_ratings.map(u32::from).or(m.exif.iso_speed)),
-        exposure_time: meta.as_ref().and_then(|m| m.exif.exposure_time).map(|r| r.n as f64 / r.d.max(1) as f64),
-        f_number: meta.as_ref().and_then(|m| m.exif.fnumber).map(|r| r.n as f64 / r.d.max(1) as f64),
-        focal_length: meta.as_ref().and_then(|m| m.exif.focal_length).map(|r| r.n as f64 / r.d.max(1) as f64),
-        date_time: meta.as_ref().and_then(|m| m.exif.date_time_original.clone()),
-        orientation,
-        baseline_exposure: dng.as_ref().and_then(|d| d.baseline_exposure).unwrap_or(0.0),
-        raw: Some(RawInfo {
-            is_dng: dng.is_some(),
-            sensor_size: (raw.width, raw.height),
-            crop,
-            cfa: cfa_name,
-            black_level: raw.blacklevel.as_vec(),
-            white_level: raw.whitelevel.as_vec(),
-            as_shot_neutral: neutral,
-            as_shot_white,
-        }),
-    };
-    Ok(Photo {
-        info,
-        data: image,
-        color: ColorSource::Camera(Box::new(CameraData { profile, as_shot_neutral: neutral })),
-    })
-}
-
-/// Black/white normalisation, demosaic and crop. Returns camera RGB where 1.0
-/// is the clip point of each channel, the crop used (x, y, w, h in sensor
-/// pixels) and the CFA pattern name.
-fn sensor_to_camera_rgb(raw: &RawImage, half: bool) -> Result<(Image, [usize; 4], String), Error> {
-    let (w, h) = (raw.width, raw.height);
-    let area = raw.crop_area.or(raw.active_area);
-    let crop = area.map_or([0, 0, w, h], |r| [r.p.x, r.p.y, r.d.w, r.d.h]);
-    // The DNG BlackLevel pattern is anchored at the active area origin.
-    let origin = raw.active_area.map_or((0, 0), |r| (r.p.x, r.p.y));
-
-    let samples = raw.data.as_f32();
-    let black = raw.blacklevel.as_vec();
-    let (bw, bh) = (raw.blacklevel.width.max(1), raw.blacklevel.height.max(1));
-    let white = raw.whitelevel.as_vec();
-    let cpp = raw.cpp;
-    let normalise = |x: usize, y: usize, c: usize| -> f32 {
-        let bx = (x + bw - origin.0 % bw) % bw;
-        let by = (y + bh - origin.1 % bh) % bh;
-        let b = black.get((by * bw + bx) * cpp + c).or(black.first()).copied().unwrap_or(0.0);
-        let wl = white.get(c).or(white.first()).copied().unwrap_or(65535.0);
-        (samples[(y * w + x) * cpp + c] - b) / (wl - b).max(1.0)
-    };
-
-    match &raw.photometric {
-        RawPhotometricInterpretation::Cfa(cfg) => {
-            let cfa = Cfa {
-                width: cfg.cfa.width,
-                height: cfg.cfa.height,
-                colors: (0..cfg.cfa.height)
-                    .flat_map(|y| (0..cfg.cfa.width).map(move |x| (x, y)))
-                    .map(|(x, y)| cfg.cfa.color_at(y, x) as u8)
-                    .collect(),
-            };
-            if cfa.colors.iter().any(|&c| c > 2) || cfa.width == 0 {
-                return Err(Error::Unsupported(format!("colour filter pattern {:?}", cfg.cfa.name)));
-            }
-            let mosaic: Vec<f32> = (0..w * h).into_par_iter().map(|i| normalise(i % w, i / w, 0)).collect();
-            if half {
-                // Align the crop to the 2×2 cells so they stay whole.
-                let [x, y, cw, ch] = crop;
-                if let Some(img) = demosaic::half_size(&mosaic, w, h, &cfa) {
-                    let img = img.crop(x.div_ceil(2), y.div_ceil(2), cw / 2, ch / 2);
-                    return Ok((img, crop, cfa.name()));
-                }
-            }
-            let img = demosaic::bilinear(&mosaic, w, h, &cfa);
-            Ok((img.crop(crop[0], crop[1], crop[2], crop[3]), crop, cfa.name()))
-        }
-        RawPhotometricInterpretation::LinearRaw | RawPhotometricInterpretation::BlackIsZero => {
-            let img = Image::from_fn(w, h, |x, y| {
-                if cpp >= 3 {
-                    std::array::from_fn(|c| normalise(x, y, c))
-                } else {
-                    [normalise(x, y, 0); 3]
-                }
-            });
-            let img = img.crop(crop[0], crop[1], crop[2], crop[3]);
-            let img = if half { img.downscale(img.width.max(img.height) / 2) } else { img };
-            let name = if cpp >= 3 { "linear RGB" } else { "monochrome" };
-            Ok((img, crop, name.to_string()))
-        }
-    }
+    crate::capture::capture(path, opts, false).map(crate::capture::Capture::into_photo)
 }
 
 /// DNG colour tags that rawler does not interpret.
-struct DngTags {
+pub(crate) struct DngTags {
     illuminants: [Option<u16>; 2],
     color_matrices: [Option<Mat3>; 2],
     forward_matrices: [Option<Mat3>; 2],
@@ -157,11 +47,12 @@ struct DngTags {
     analog_balance: Option<Mat3>,
     as_shot_neutral: Option<Vec3>,
     as_shot_white_xy: Option<Xy>,
-    baseline_exposure: Option<f64>,
+    pub(crate) baseline_exposure: Option<f64>,
+    pub(crate) unique_camera_model: Option<String>,
 }
 
 impl DngTags {
-    fn read(decoder: &dyn Decoder) -> Option<DngTags> {
+    pub(crate) fn read(decoder: &dyn Decoder) -> Option<DngTags> {
         let root = decoder.ifd(WellKnownIFD::Root).ok()??;
         root.get_entry(DngTag::DNGVersion)?;
         let raw = decoder.ifd(WellKnownIFD::Raw).ok().flatten();
@@ -184,6 +75,7 @@ impl DngTags {
             as_shot_neutral: vec3(DngTag::AsShotNeutral),
             as_shot_white_xy: floats(DngTag::AsShotWhiteXY).filter(|v| v.len() == 2).map(|v| Xy::new(v[0], v[1])),
             baseline_exposure: floats(DngTag::BaselineExposure).and_then(|v| v.first().copied()),
+            unique_camera_model: root.get_entry(DngTag::UniqueCameraModel).and_then(|e| e.as_string()).map(|s| s.trim_end_matches('\0').to_string()),
         })
     }
 }
@@ -194,7 +86,7 @@ fn to_mat3(v: &[f64]) -> Mat3 {
 
 /// The camera profile and the as-shot neutral (camera response to the scene
 /// white, max component 1).
-fn color_profile(raw: &RawImage, dng: Option<&DngTags>) -> Result<(ColorProfile, Vec3), Error> {
+pub(crate) fn color_profile(raw: &RawImage, dng: Option<&DngTags>) -> Result<(ColorProfile, Vec3), Error> {
     let profile = match dng {
         Some(d) => {
             let mut cals = Vec::new();

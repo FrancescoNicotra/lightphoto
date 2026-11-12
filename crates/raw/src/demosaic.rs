@@ -62,7 +62,8 @@ type Taps = [Vec<(isize, isize)>; 3];
 
 /// For each position in the pattern and each colour, the neighbours to
 /// average: the pixel itself for its own colour, otherwise the matching
-/// pixels in the 3×3 window (5×5 if the 3×3 has none, which X-Trans needs).
+/// pixels in the 3×3 window (5×5 if the 3×3 has none: never for Bayer or
+/// X-Trans, whose 3×3 windows all hold the three colours).
 fn neighbourhoods(cfa: &Cfa) -> Vec<Taps> {
     let mut out = Vec::with_capacity(cfa.width * cfa.height);
     for py in 0..cfa.height {
@@ -91,6 +92,18 @@ fn neighbourhoods(cfa: &Cfa) -> Vec<Taps> {
         }
     }
     out
+}
+
+/// How far [`bilinear`] reaches: output pixel (x, y) only reads photosites
+/// within this many pixels of it. 1 for Bayer and X-Trans, 2 for a pattern
+/// that lacks a colour in some 3×3 window.
+pub fn support_radius(cfa: &Cfa) -> usize {
+    neighbourhoods(cfa)
+        .iter()
+        .flat_map(|taps| taps.iter().flatten())
+        .map(|&(dx, dy)| dx.unsigned_abs().max(dy.unsigned_abs()))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Bilinear demosaic of a `width`×`height` mosaic.
@@ -205,6 +218,16 @@ mod tests {
         // Cell (0,0): greens at (0,0) and (1,1) -> mean of 0 and 2.
         assert_eq!(img.get(0, 0), [1.0, 1.0, 3.0]);
         assert!(half_size(&m, 4, 4, &xtrans()).is_none());
+    }
+
+    #[test]
+    fn support_radius_of_patterns() {
+        assert_eq!(support_radius(&Cfa::bayer("RGGB").unwrap()), 1);
+        // Every 3×3 window of X-Trans holds R, G and B.
+        assert_eq!(support_radius(&xtrans()), 1);
+        // R and B once per 4×4: some 3×3 windows miss one of them.
+        let sparse = Cfa { width: 4, height: 4, colors: "RGGGGGGGGGBGGGGG".chars().map(|c| "RGB".find(c).unwrap() as u8).collect() };
+        assert_eq!(support_radius(&sparse), 2);
     }
 
     #[test]

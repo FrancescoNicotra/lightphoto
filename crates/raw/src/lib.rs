@@ -4,14 +4,19 @@
 //! applies the DNG colour model with a chosen white balance:
 //!
 //! ```text
-//! file ─rawler→ mosaic ─black/white→ 0..1 ─demosaic→ camera RGB ─crop/orient→ Photo
+//! file ─rawler→ mosaic ─black/white→ 0..1 ─demosaic→ camera RGB ─crop→ Capture ─orient→ Photo
 //! Photo::to_working(white) ─WB + clip→ ─camera→XYZ D50 (DNG maths)→ ProPhoto linear
 //! ```
+//!
+//! [`dng_write`] goes the other way: linear camera RGB (an HDR merge) to a
+//! floating point LinearRaw DNG.
 
+pub mod capture;
 pub mod color;
 pub mod dcp;
 mod decode;
 pub mod demosaic;
+pub mod dng_write;
 pub mod hue_sat;
 pub mod image;
 pub mod profile;
@@ -19,6 +24,8 @@ pub mod profile;
 use std::path::Path;
 
 pub use crate::image::{Image, Orientation};
+pub use capture::{load_capture, Capture};
+pub use dng_write::{write_linear_dng, DngEncoding, LinearDng};
 pub use color::{TempTint, Xy};
 pub use decode::{embedded_preview, is_rendered_image};
 pub use profile::ColorProfile;
@@ -28,6 +35,7 @@ pub enum Error {
     Io(std::io::Error),
     Decode(String),
     Unsupported(String),
+    Encode(String),
 }
 
 impl std::fmt::Display for Error {
@@ -36,6 +44,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Decode(e) => write!(f, "decoding failed: {e}"),
             Error::Unsupported(e) => write!(f, "unsupported: {e}"),
+            Error::Encode(e) => write!(f, "encoding failed: {e}"),
         }
     }
 }
@@ -104,6 +113,9 @@ pub struct PhotoInfo {
 #[derive(Clone, Debug)]
 pub struct RawInfo {
     pub is_dng: bool,
+    /// Floating point samples (an HDR merge): `white_level` is 1.0 and the
+    /// data may exceed the range of a single exposure.
+    pub float: bool,
     pub sensor_size: (usize, usize),
     /// x, y, width, height of the default crop on the sensor.
     pub crop: [usize; 4],
