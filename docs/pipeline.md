@@ -18,10 +18,12 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 | 7 | **Basic** | Melissa | Contrast (power curve around mid grey), Highlights/Shadows (bells centred at 0.75 and 0.25), Whites/Blacks (ends). **Global**, not local as in Adobe |
 | 8 | **Curves** | Melissa | parametric (4 regions with splits) → master points → R/G/B, monotone cubic spline (Fritsch–Carlson) |
 | 9 | **ShadowTint** | Melissa | green/magenta in the shadows |
+| 9b | **Local corrections (point-wise)** | Melissa | for each mask, through its weight map: Exposure and Temperature/Tint as gains in linear, Contrast/Highlights/Shadows/Whites/Blacks through the Basic tone curve, Saturation around the luma ([`masks.rs`](../crates/pipeline/src/masks.rs)) |
 | 10 | **Colour NR** | Melissa | chroma blur, radius ∝ Amount |
 | 11 | **Texture / Clarity** | Melissa luma | difference from a blur (0.15% / 1.2% of the long edge), weighted towards the midtones |
 | 12 | **Dehaze** | Melissa | global veil model |
 | 13 | **Sharpening** | Melissa luma | unsharp mask: Radius, Detail (halo limit), Masking (edges only) |
+| 13b | **Local corrections (spatial)** | Melissa | Texture/Clarity, Dehaze and Sharpness of each mask: the global operation on a copy, blended in through the weights |
 | 14 | **Post-crop vignette** | Melissa | Amount, Midpoint, Roundness, Feather |
 | 15 | **HSL** | encoded Rec.709 → (Y, a, b) | 8 overlapping bands whose weights sum to 1. Hue ±100 = ±40°, Saturation ±100 = ±13% chroma. Luminance leaves greys alone |
 | 16 | **Vibrance / Saturation** | (Y, a, b) | vibrance acts more on dull colours and protects skin tones |
@@ -30,6 +32,18 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 | 19 | **Grain** | after resizing | two-octave value noise (Size, Frequency = Roughness), fixed seed |
 
 \* *Melissa* = ProPhoto primaries with the sRGB transfer curve, the space of Lightroom's curves and RGB readouts.
+
+## Masks
+
+A mask is a group of components (linear gradient, radial gradient, brush) combined in order: add (maximum), subtract (× 1 − component), intersect (×). Each component can be inverted and has an opacity; the group has an Amount. The weights are computed at the resolution of the render (drafts while dragging, preview, export), so the same mask gives the same result at every size:
+
+- **Linear**: smoothstep from the `Zero` point to the `Full` point, in pixel space.
+- **Radial**: the ellipse in its bounding box, turned by `Angle`; full inside, a smooth falloff over the `Feather` part of the radius.
+- **Brush**: strokes painted in order, each dab moving the weight towards 1 (or 0 for the eraser) by its flow, full strength inside the centre weight and fading to the radius.
+
+Geometry is in fractions of the uncropped photo in its stored orientation: a `Frame` maps each developed pixel back through the crop, the straighten angle and the EXIF orientation, so masks stay on the picture when the crop changes. Masks Lumen cannot render (AI, range) are kept in the settings but not applied, with a note.
+
+The local sliders are approximations in the spirit of the global ones, not Adobe's maths: negative local Sharpness (Adobe's blur) is not applied.
 
 ## Installed Adobe profiles
 

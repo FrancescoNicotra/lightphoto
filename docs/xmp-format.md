@@ -111,3 +111,48 @@ That is why presets are applied in the raw pipeline. The `.cube` export of a par
 - RAW files: `name.xmp` next to the photo, as Lightroom does. JPEG/PNG/TIFF: `name.jpg.xmp` (Lightroom writes their settings inside the file, which Lumen never modifies).
 - Existing sidecars are updated in place: other namespaces and unknown keys are kept.
 - The LUT applied in the app is stored in Lumen's own namespace, `https://github.com/FrancescoNicotra/lightphoto/ns/1.0/` (`lumen:LUT` with the path, `lumen:LUTAmount`); other programs ignore it.
+
+## 8. Local corrections (masks)
+
+Implemented in `crates/xmp/src/masks.rs`. Containers, all read and written:
+
+| Key | Written by | Lumen |
+|---|---|---|
+| `crs:MaskGroupBasedCorrections` | Lightroom 11+ / Camera Raw 14+ | read; new masks are written here |
+| `crs:GradientBasedCorrections` | older versions (linear gradient) | read, written back to the same key |
+| `crs:CircularGradientBasedCorrections` | older versions (radial filter) | read, written back to the same key |
+| `crs:PaintBasedCorrections` | older versions (brush) | read, written back to the same key |
+
+Each container is an `rdf:Seq` of corrections:
+
+```xml
+<crs:MaskGroupBasedCorrections><rdf:Seq><rdf:li><rdf:Description
+    crs:What="Correction" crs:CorrectionName="Mask 1" crs:CorrectionActive="true"
+    crs:CorrectionAmount="1" crs:LocalExposure2012="-0.375" crs:LocalTemperature="-0.3" …>
+  <crs:CorrectionMasks><rdf:Seq>
+    <rdf:li><rdf:Description crs:What="Mask/Gradient" crs:MaskValue="1" crs:MaskBlendMode="0"
+        crs:MaskInverted="false" crs:ZeroX="0.5" crs:ZeroY="0.55" crs:FullX="0.5" crs:FullY="0.25"/></rdf:li>
+  </rdf:Seq></crs:CorrectionMasks>
+</rdf:Description></rdf:li></rdf:Seq></crs:MaskGroupBasedCorrections>
+```
+
+What is **verified**, and against what:
+
+- **Field names**, from ExifTool's Camera Raw tables (Correction and CorrectionMask structs): `What`, `CorrectionName`, `CorrectionActive`, `CorrectionAmount`, `CorrectionMasks`, `CorrectionSyncID`, `Local*` (`LocalExposure2012`, `LocalContrast2012`, `LocalHighlights2012`, `LocalShadows2012`, `LocalWhites2012`, `LocalBlacks2012`, `LocalTemperature`, `LocalTint`, `LocalSaturation`, `LocalTexture`, `LocalClarity2012`, `LocalDehaze`, `LocalSharpness`…); for components `What`, `MaskValue`, `MaskBlendMode`, `MaskInverted`, `ZeroX/ZeroY/FullX/FullY`, `Top/Left/Bottom/Right`, `Angle`, `Midpoint`, `Roundness`, `Feather`, `Flipped`, `Radius`, `Flow`, `CenterWeight`, `Dabs`, `Masks`.
+- **Component kinds** `Mask/Gradient`, `Mask/CircularGradient`, `Mask/Paint`, and a radial gradient block from a Camera Raw 11.4 file (`Top/Left/Bottom/Right/Angle/Midpoint/Roundness/Feather/Flipped/Version`).
+
+What comes from **other projects' observations of Lightroom** (not from Adobe, not checked against a file of ours):
+
+- Local values are stored scaled: **`LocalExposure2012` = EV / 4**, the other sliders −1..1 (UI value / 100).
+- **`MaskBlendMode`**: 0 = add, 1 = subtract. Lumen writes 2 for intersect, which Lightroom may not accept (it is reported to coerce 2 to 0 and to represent intersections differently).
+- **Brush**: in `MaskGroupBasedCorrections` a brush is a `Mask/Aggregate` whose `Masks` holds the `Mask/Paint` strokes; the older layout puts the `Mask/Paint` strokes straight in `CorrectionMasks`. Each stroke has `Radius`, `Flow`, `CenterWeight` and `Dabs`, a sequence of `"d x y"` strings in fractions of the image; erasing strokes have `MaskValue` 0. A leading `"f 0.3"` item can carry the flow. Newer Lightroom versions may keep part of the brush data in a binary `.acr` file instead.
+- `Flipped` is the opposite of `MaskInverted` on radial gradients (the older radial filter acted outside the ellipse unless flipped).
+
+**Lumen's assumptions** (to check against Lightroom files):
+
+- Coordinates are fractions of the **uncropped** image in the file's **stored orientation**, like the crop; a mask stays on the same part of the picture when the crop changes.
+- Brush `Radius` is a fraction of the image's long edge; `CenterWeight` is the fraction of the radius at full strength (1 − feather).
+- A linear gradient goes from no effect at `Zero` to full effect at `Full` (smoothstep); a radial gradient is the ellipse inscribed in `Top/Left/Bottom/Right`, turned by `Angle` (clockwise), full inside, with `Feather` the soft part of the radius; `Midpoint` and `Roundness` are kept but not used.
+- Components combine in order: add = maximum, subtract = multiply by (1 − component), intersect = multiply.
+
+**Kept as they are**: unknown fields of corrections and components (sync ids, versions…) and components Lumen cannot render (`Mask/Image` AI masks, range masks, depth): they are written back unchanged. A correction holding one of those is not applied, and the app marks it.

@@ -14,9 +14,11 @@ use pipeline::SourceKind;
 use raw::PhotoInfo;
 
 use crate::i18n::{tr, trf};
+use crate::icons::{icon_button, Icon};
 use crate::crop_tool::{CropTool, ASPECTS};
 use crate::export_ui::{self, DialogResult, ExportEvent, ExportJob, ExportSettings};
 use crate::library::{self, PresetEntry, PresetKind};
+use crate::masks_ui::{Kind, MaskEditor, MaskUi};
 use crate::panels::{self, PanelAction, PanelInput, PanelState};
 use crate::script::{Script, Selection, Step};
 use crate::state::{self, Edit, History, LutRef};
@@ -29,6 +31,26 @@ use crate::Args;
 const KEY_PHOTO_FOLDER: &str = "photo_folder";
 const KEY_PRESET_FOLDER: &str = "preset_folder";
 const KEY_EXPORT: &str = "export";
+
+/// The tools of the vertical strip. Crop and the picker keep their own
+/// state (`crop_tool`, `picking`); the gradients are one-shot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Navigate,
+    Crop,
+    Picker,
+    Brush,
+    Eraser,
+    Linear,
+    Radial,
+}
+
+/// The two pages of the left panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeftTab {
+    Presets,
+    Masks,
+}
 
 /// The open photo.
 struct Current {
@@ -96,8 +118,8 @@ pub struct LumenApp {
     generation: u64,
 
     job_id: u64,
-    /// The last render request: edit, detail, draft.
-    last_sent: Option<(Edit, bool, bool)>,
+    /// The last render request: edit, detail, draft, mask overlay.
+    last_sent: Option<(Edit, bool, bool, Option<usize>)>,
     after: Option<Shown>,
     detail: Option<Shown>,
     before: Option<TextureHandle>,
@@ -122,6 +144,11 @@ pub struct LumenApp {
     crop_tool: Option<CropTool>,
     /// White balance eyedropper active.
     picking: bool,
+    mask_ui: MaskUi,
+    /// Navigate, Brush or Eraser.
+    tool: Tool,
+    /// What the left panel shows.
+    left_tab: LeftTab,
     /// Preset thumbnails: (photo, preset) → texture.
     preset_thumbs: HashMap<(PathBuf, PathBuf), TextureHandle>,
     /// Photo and preset count the thumbnails were last asked for.
@@ -192,6 +219,9 @@ impl LumenApp {
             panel_state: PanelState::default(),
             crop_tool: None,
             picking: false,
+            mask_ui: MaskUi::default(),
+            tool: Tool::Navigate,
+            left_tab: LeftTab::Presets,
             preset_thumbs: HashMap::new(),
             thumbs_asked: None,
             export: get(KEY_EXPORT).map(|s| ExportSettings::from_storage(&s)).unwrap_or_default(),
@@ -465,6 +495,8 @@ impl LumenApp {
         self.hover_cache = None;
         self.crop_tool = None;
         self.picking = false;
+        self.mask_ui.selected = None;
+        self.mask_ui.component = None;
         self.viewer.reset();
     }
 
@@ -717,15 +749,16 @@ impl LumenApp {
         };
         let detail = self.wants_detail && !self.viewer.show_before;
         let draft = (pointer_down && ctx.dragged_id().is_some()) || self.script.as_ref().is_some_and(Script::dragging);
-        if let Some((e, d, was_draft)) = &self.last_sent {
+        let overlay = self.mask_ui.selected.filter(|_| self.mask_ui.overlay && self.mask_ui.open && self.crop_tool.is_none());
+        if let Some((e, d, was_draft, o)) = &self.last_sent {
             // Same request: resend only to replace a draft by the preview.
-            if e == target && *d == detail && (draft || !*was_draft) {
+            if e == target && *d == detail && *o == overlay && (draft || !*was_draft) {
                 return;
             }
         }
         self.job_id += 1;
-        let job = RenderJob { id: self.job_id, generation: c.generation, edit: target.clone(), draft, detail };
-        self.last_sent = Some((target.clone(), detail, draft));
+        let job = RenderJob { id: self.job_id, generation: c.generation, edit: target.clone(), draft, detail, overlay };
+        self.last_sent = Some((target.clone(), detail, draft, overlay));
         self.worker.render(job);
     }
 
@@ -758,11 +791,26 @@ impl LumenApp {
         if pressed(shortcut(cmd, Key::A)) {
             self.select_all();
         }
-        if pressed(shortcut(Modifiers::NONE, Key::R)) {
-            self.toggle_crop_tool(false);
+        for (key, tool) in [
+            (Key::H, Tool::Navigate),
+            (Key::R, Tool::Crop),
+            (Key::W, Tool::Picker),
+            (Key::B, Tool::Brush),
+            (Key::E, Tool::Eraser),
+            (Key::L, Tool::Linear),
+            (Key::G, Tool::Radial),
+        ] {
+            if pressed(shortcut(Modifiers::NONE, key)) {
+                let active = self.active_tool();
+                let toggles = matches!(tool, Tool::Crop | Tool::Picker | Tool::Brush | Tool::Eraser);
+                self.select_tool(if tool == active && toggles { Tool::Navigate } else { tool });
+            }
         }
-        if pressed(shortcut(Modifiers::NONE, Key::W)) && self.crop_tool.is_none() {
-            self.picking = !self.picking;
+        if pressed(shortcut(Modifiers::NONE, Key::M)) {
+            self.left_tab = if self.left_tab == LeftTab::Masks { LeftTab::Presets } else { LeftTab::Masks };
+        }
+        if pressed(shortcut(Modifiers::NONE, Key::O)) {
+            self.mask_ui.overlay = !self.mask_ui.overlay;
         }
         if self.crop_tool.is_some() && pressed(shortcut(Modifiers::NONE, Key::Enter)) {
             self.toggle_crop_tool(false);
@@ -789,6 +837,7 @@ impl LumenApp {
                 self.toggle_crop_tool(true);
             }
             self.picking = false;
+            self.tool = Tool::Navigate;
             self.export_open = false;
         }
     }
@@ -946,6 +995,10 @@ impl LumenApp {
                     ui.close();
                     self.toggle_crop_tool(false);
                 }
+                if ui.add_enabled(loaded, egui::Button::new(tr("Masks", "Maschere")).shortcut_text("M")).clicked() {
+                    ui.close();
+                    self.left_tab = LeftTab::Masks;
+                }
                 if ui.add_enabled(loaded, egui::Button::new(tr("White balance picker", "Contagocce bilanciamento")).shortcut_text("W")).clicked() {
                     ui.close();
                     self.picking = true;
@@ -958,17 +1011,51 @@ impl LumenApp {
         });
     }
 
+    /// The left panel: presets or masks.
+    fn left_panel(&mut self, ui: &mut Ui) {
+        let masks = self.current.as_ref().map_or(0, |c| c.edit.settings.masks.len());
+        ui.horizontal(|ui| {
+            let tab = |ui: &mut Ui, current: &mut LeftTab, tab: LeftTab, text: String| {
+                ui.selectable_value(current, tab, RichText::new(text).strong().size(14.0));
+            };
+            tab(ui, &mut self.left_tab, LeftTab::Presets, "Preset".into());
+            let label = if masks > 0 { format!("{} ({masks})", tr("Masks", "Maschere")) } else { tr("Masks", "Maschere").to_string() };
+            tab(ui, &mut self.left_tab, LeftTab::Masks, label);
+        });
+        ui.separator();
+        self.mask_ui.open = false;
+        match self.left_tab {
+            LeftTab::Presets => self.preset_panel(ui),
+            LeftTab::Masks => self.masks_panel(ui),
+        }
+    }
+
+    /// The Masks page: list, components, brush and local sliders. While it
+    /// is open the selected mask is edited on the photo.
+    fn masks_panel(&mut self, ui: &mut Ui) {
+        self.hover_preset = None;
+        let tool_open = self.crop_tool.is_some();
+        let Some(c) = self.current.as_mut().filter(|c| c.loaded) else {
+            ui.label(RichText::new(tr("Open a photo to add masks.", "Apri una foto per aggiungere maschere.")).color(theme::TEXT_DIM));
+            return;
+        };
+        let mask_ui = &mut self.mask_ui;
+        mask_ui.open = !tool_open;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.add_enabled_ui(!tool_open, |ui| mask_ui.panel(ui, &mut c.edit.settings.masks));
+        });
+    }
+
     fn preset_panel(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Preset").strong().size(15.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button(tr("Folder…", "Cartella…")).on_hover_text(tr("Choose the preset folder (.xmp, .dng, .cube)", "Scegli la cartella dei preset (.xmp, .dng, .cube)")).clicked() {
                     self.pick_preset_folder(&ctx);
                 }
+                ui.add(egui::TextEdit::singleline(&mut self.preset_filter).hint_text(tr("Search…", "Cerca…")).desired_width(f32::INFINITY));
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut self.preset_filter).hint_text(tr("Search…", "Cerca…")).desired_width(f32::INFINITY));
         ui.separator();
         self.hover_preset = None;
         if self.preset_folder.is_none() {
@@ -1180,25 +1267,107 @@ impl LumenApp {
         });
     }
 
-    fn central(&mut self, ui: &mut Ui) {
-        let mut toggle_crop = false;
-        egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            // Wraps to a second line when the view is narrow.
-            ui.horizontal_wrapped(|ui| {
-                self.viewer.toolbar(ui, self.current.is_some());
-                ui.separator();
-                ui.add_enabled_ui(self.current.as_ref().is_some_and(|c| c.loaded), |ui| {
-                    let r = ui.selectable_label(self.crop_tool.is_some(), tr("Crop  R", "Ritaglia  R"));
-                    toggle_crop = r.on_hover_text(tr("Crop and straighten (R)", "Ritaglia e raddrizza (R)")).clicked();
-                    ui.toggle_value(&mut self.picking, tr("WB picker  W", "Contagocce  W"))
-                        .on_hover_text(tr("Click a neutral point to set the white balance (W)", "Clic su un punto neutro per il bilanciamento del bianco (W)"));
-                });
-            });
-        });
-        if toggle_crop {
+    /// The tool shown as active.
+    fn active_tool(&self) -> Tool {
+        if self.crop_tool.is_some() {
+            Tool::Crop
+        } else if self.picking {
+            Tool::Picker
+        } else {
+            self.tool
+        }
+    }
+
+    /// Switches tool. Leaving the crop applies it; the gradient tools add a
+    /// new mask and go back to Navigate, where its handles are on the photo.
+    fn select_tool(&mut self, tool: Tool) {
+        if self.current.as_ref().is_none_or(|c| !c.loaded) {
+            return;
+        }
+        if tool != Tool::Crop && self.crop_tool.is_some() {
             self.toggle_crop_tool(false);
         }
+        self.picking = false;
+        self.tool = Tool::Navigate;
+        match tool {
+            Tool::Navigate => {}
+            Tool::Crop => {
+                if self.crop_tool.is_none() {
+                    self.toggle_crop_tool(false);
+                }
+            }
+            Tool::Picker => self.picking = true,
+            Tool::Brush | Tool::Eraser | Tool::Linear | Tool::Radial => {
+                let Some(c) = &mut self.current else { return };
+                let masks = &mut c.edit.settings.masks;
+                self.left_tab = LeftTab::Masks;
+                match tool {
+                    Tool::Brush | Tool::Eraser => {
+                        self.mask_ui.ensure_brush(masks);
+                        self.mask_ui.brush.erase = tool == Tool::Eraser;
+                        self.tool = tool;
+                    }
+                    Tool::Linear => self.mask_ui.new_mask(masks, Kind::Linear),
+                    _ => self.mask_ui.new_mask(masks, Kind::Radial),
+                }
+            }
+        }
+    }
+
+    /// The vertical tool strip at the left of the photo.
+    fn tool_strip(&mut self, ui: &mut Ui) {
+        let active = self.active_tool();
+        let enabled = self.current.as_ref().is_some_and(|c| c.loaded);
+        let mut chosen = None;
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let groups = [
+                    vec![
+                        (Tool::Navigate, Icon::Move, tr("Navigate: drag to pan, pinch or Alt/⌥ + wheel to zoom (H)", "Navigazione: trascina per spostare, pizzico o Alt/⌥ + rotella per lo zoom (H)")),
+                        (Tool::Crop, Icon::Crop, tr("Crop and straighten (R)", "Ritaglia e raddrizza (R)")),
+                        (Tool::Picker, Icon::Picker, tr("White balance picker: click a neutral point (W)", "Contagocce del bilanciamento: clic su un punto neutro (W)")),
+                    ],
+                    vec![
+                        (Tool::Brush, Icon::Brush, tr("Mask brush (B)", "Pennello maschera (B)")),
+                        (Tool::Eraser, Icon::Eraser, tr("Mask eraser (E, or Alt while painting)", "Gomma maschera (E, o Alt mentre dipingi)")),
+                        (Tool::Linear, Icon::LinearGradient, tr("New linear gradient mask (L)", "Nuova maschera sfumatura lineare (L)")),
+                        (Tool::Radial, Icon::RadialGradient, tr("New radial gradient mask (G)", "Nuova maschera sfumatura radiale (G)")),
+                    ],
+                ];
+                for (g, group) in groups.into_iter().enumerate() {
+                    if g > 0 {
+                        ui.separator();
+                    }
+                    for (tool, icon, tip) in group {
+                        if icon_button(ui, icon, active == tool, tip).clicked() {
+                            chosen = Some(tool);
+                        }
+                    }
+                }
+            });
+        });
+        if let Some(t) = chosen {
+            // Clicking the active tool goes back to Navigate.
+            self.select_tool(if t == active && t != Tool::Navigate { Tool::Navigate } else { t });
+        }
+    }
+
+    fn central(&mut self, ui: &mut Ui) {
+        egui::Panel::left("tools")
+            .frame(egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(4, 8)))
+            .exact_size(38.0)
+            .resizable(false)
+            .show(ui, |ui| self.tool_strip(ui));
+        egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Wraps to a second line when the view is narrow; the buttons
+            // themselves keep their text on one line.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.horizontal_wrapped(|ui| {
+                self.viewer.toolbar(ui, self.current.is_some());
+            });
+        });
         let message = match &self.current {
             None => Some(viewer::empty_message()),
             Some(c) if c.error.is_some() => Some(trf!("Cannot open {}: {}", "Impossibile aprire {}: {}", file_name(&c.path), c.error.as_deref().unwrap_or(""))),
@@ -1216,7 +1385,24 @@ impl LumenApp {
             full_size[0] * PREVIEW_SIZE.min(long) / long
         });
         let input = ViewInput { after: texture, before: self.before.as_ref(), full_size, preview_width, message, picking: self.picking };
-        let out = self.viewer.show(ui, &input, self.crop_tool.as_mut());
+        let mut editor = None;
+        if self.crop_tool.is_none() && self.mask_ui.open {
+            if let (Some(c), Some(i)) = (self.current.as_mut(), self.mask_ui.selected) {
+                let o = c.info.as_ref().map(|i| i.orientation).unwrap_or_default();
+                let [fw, fh] = c.full_size;
+                let frame = pipeline::masks::Frame::new(fw, fh, &c.edit.settings.crop, o, full_size[0], full_size[1]);
+                let stored = if o.swaps_axes() { [fh as f32, fw as f32] } else { [fw as f32, fh as f32] };
+                if let Some(mask) = c.edit.settings.masks.get_mut(i) {
+                    editor = Some(MaskEditor { mask, ui: &mut self.mask_ui, frame, shown: full_size, stored });
+                }
+            }
+        }
+        let tool: Option<&mut dyn viewer::ViewTool> = match (self.crop_tool.as_mut(), editor.as_mut()) {
+            (Some(t), _) => Some(t),
+            (None, Some(e)) => Some(e),
+            _ => None,
+        };
+        let out = self.viewer.show(ui, &input, tool);
         self.wants_detail = out.wants_detail;
         if let Some(p) = out.picked {
             self.pick_white_at(p);
@@ -1367,7 +1553,7 @@ impl LumenApp {
     fn is_idle(&self) -> bool {
         let Some(c) = &self.current else { return self.preset_rx.is_none() };
         let rendered = |s: &Option<Shown>| s.as_ref().is_some_and(|s| s.id == self.job_id);
-        let detail = self.last_sent.as_ref().is_some_and(|(_, d, _)| *d);
+        let detail = self.last_sent.as_ref().is_some_and(|(_, d, _, _)| *d);
         (c.error.is_some() || (c.loaded && rendered(&self.after) && self.render_quality != Quality::Draft))
             && (!detail || rendered(&self.detail))
             && (!self.viewer.show_before || self.before.is_some())
@@ -1400,7 +1586,11 @@ impl LumenApp {
             Step::Reset => self.reset_edit(),
             Step::Before(on) => self.viewer.show_before = on,
             Step::Zoom(z) => self.viewer.zoom = z.map_or(viewer::Zoom::Fit, viewer::Zoom::Ratio),
-            Step::Panel(title) => self.panel_state.force_open = Some(title),
+            Step::Panel(title) => match title.as_str() {
+                "masks" => self.left_tab = LeftTab::Masks,
+                "presets" => self.left_tab = LeftTab::Presets,
+                _ => self.panel_state.force_open = Some(title),
+            },
             Step::Tab(which, n) => match which.as_str() {
                 "curve" => self.panel_state.curve_tab = n,
                 "hsl" => self.panel_state.hsl_tab = n,
@@ -1462,7 +1652,112 @@ impl LumenApp {
             Step::Compare(mode) => self.viewer.compare = mode,
             Step::Pick(u, v) => self.pick_white_at((u, v)),
             Step::Auto => self.auto_tone(),
+            Step::Overlay(on) => self.mask_ui.overlay = on,
+            Step::Tool(t) => self.select_tool(t),
+            Step::Mask(args) => self.script_mask(&args),
             Step::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    /// `mask …` script steps (see script.rs).
+    fn script_mask(&mut self, args: &[String]) {
+        use xmp::masks::{BlendMode, MaskShape, Stroke};
+        let Some(c) = &mut self.current else { return };
+        let masks = &mut c.edit.settings.masks;
+        let ui = &mut self.mask_ui;
+        let num = |i: usize| args.get(i).and_then(|s| s.parse::<f32>().ok());
+        let kind = |s: Option<&String>| match s.map(String::as_str) {
+            Some("radial") => Kind::Radial,
+            Some("brush") => Kind::Brush,
+            _ => Kind::Linear,
+        };
+        match args.first().map(String::as_str) {
+            Some("new") => ui.new_mask(masks, kind(args.get(1))),
+            Some("select") => {
+                ui.selected = num(1).map(|n| n as usize).filter(|n| *n < masks.len());
+                ui.component = Some(0);
+            }
+            Some("component") => ui.component = num(1).map(|n| n as usize),
+            Some(m @ ("add" | "sub" | "int")) => {
+                let mode = match m {
+                    "sub" => BlendMode::Subtract,
+                    "int" => BlendMode::Intersect,
+                    _ => BlendMode::Add,
+                };
+                ui.add_component(masks, kind(args.get(1)), mode);
+            }
+            Some("delete") => {
+                if let Some(i) = ui.selected.filter(|i| *i < masks.len()) {
+                    masks.remove(i);
+                }
+                ui.selected = None;
+            }
+            Some("amount") => {
+                if let (Some(m), Some(a)) = (ui.selected.and_then(|i| masks.get_mut(i)), num(1)) {
+                    m.amount = a / 100.0;
+                }
+            }
+            Some("set") => {
+                if let (Some(m), Some(key), Some(v)) = (ui.selected.and_then(|i| masks.get_mut(i)), args.get(1), num(2)) {
+                    let a = &mut m.adjust;
+                    match key.as_str() {
+                        "exposure" => a.exposure = v,
+                        "contrast" => a.contrast = v,
+                        "highlights" => a.highlights = v,
+                        "shadows" => a.shadows = v,
+                        "whites" => a.whites = v,
+                        "blacks" => a.blacks = v,
+                        "temperature" => a.temperature = v,
+                        "tint" => a.tint = v,
+                        "saturation" => a.saturation = v,
+                        "texture" => a.texture = v,
+                        "clarity" => a.clarity = v,
+                        "dehaze" => a.dehaze = v,
+                        "sharpness" => a.sharpness = v,
+                        other => eprintln!("script: unknown mask slider {other:?}"),
+                    }
+                }
+            }
+            Some("brush") => {
+                if let Some(s) = num(1) {
+                    ui.brush.size = s / 100.0;
+                }
+                if let Some(f) = num(2) {
+                    ui.brush.feather = f;
+                }
+                if let Some(f) = num(3) {
+                    ui.brush.flow = f;
+                }
+            }
+            Some(shape @ ("linear" | "radial" | "paint")) => {
+                let (Some(i), Some(j)) = (ui.selected, ui.component) else { return };
+                let Some(c) = masks.get_mut(i).and_then(|m| m.components.get_mut(j)) else { return };
+                match (&mut c.shape, shape) {
+                    (MaskShape::Linear { zero, full }, "linear") => {
+                        if let (Some(a), Some(b), Some(x), Some(y)) = (num(1), num(2), num(3), num(4)) {
+                            (*zero, *full) = ((a, b), (x, y));
+                        }
+                    }
+                    (MaskShape::Radial { top, left, bottom, right, angle, feather, .. }, "radial") => {
+                        if let (Some(t), Some(l), Some(b), Some(r)) = (num(1), num(2), num(3), num(4)) {
+                            (*top, *left, *bottom, *right) = (t, l, b, r);
+                        }
+                        *angle = num(5).unwrap_or(*angle);
+                        *feather = num(6).unwrap_or(*feather);
+                    }
+                    (MaskShape::Brush { strokes }, "paint") => {
+                        if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (num(1), num(2), num(3), num(4)) {
+                            let b = &ui.brush;
+                            let n = ((x1 - x0).hypot(y1 - y0) / (b.size / 4.0)).ceil().max(1.0) as usize;
+                            let dabs = (0..=n).map(|k| k as f32 / n as f32).map(|t| (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)).collect();
+                            let erase = args.get(5).is_some_and(|a| a == "erase");
+                            strokes.push(Stroke { erase, radius: b.size, flow: b.flow / 100.0, center_weight: 1.0 - b.feather / 100.0, dabs, extra: Default::default() });
+                        }
+                    }
+                    _ => eprintln!("script: the selected component is not a {shape}"),
+                }
+            }
+            other => eprintln!("script: unknown mask step {other:?}"),
         }
     }
 
@@ -1485,6 +1780,18 @@ impl eframe::App for LumenApp {
         self.shortcuts(&ctx);
         self.dropped_files(&ctx);
 
+        // The brush paints only with its tool, on the selected mask's brush.
+        self.mask_ui.painting = matches!(self.tool, Tool::Brush | Tool::Eraser) && self.crop_tool.is_none() && !self.picking;
+        if self.mask_ui.painting {
+            if let Some(m) = self.mask_ui.selected.and_then(|i| self.current.as_ref()?.edit.settings.masks.get(i)) {
+                let is_brush = |j: usize| m.components.get(j).is_some_and(|c| matches!(c.shape, xmp::masks::MaskShape::Brush { .. }));
+                if !self.mask_ui.component.is_some_and(is_brush) {
+                    if let Some(j) = (0..m.components.len()).find(|j| is_brush(*j)) {
+                        self.mask_ui.component = Some(j);
+                    }
+                }
+            }
+        }
         let panel = |fill| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(8, 6));
         egui::Panel::top("menu").frame(panel(theme::PANEL_DARK)).show(ui, |ui| self.menu(ui));
         egui::Panel::bottom("status").frame(panel(theme::PANEL_DARK)).show(ui, |ui| self.status_bar(ui));
@@ -1494,12 +1801,14 @@ impl eframe::App for LumenApp {
             .default_size(118.0)
             .size_range(70.0..=240.0)
             .show(ui, |ui| self.filmstrip(ui));
+        // The masks need room for their sliders.
+        let min_left = if self.left_tab == LeftTab::Masks { 310.0 } else { 220.0 };
         egui::Panel::left("presets")
             .frame(panel(theme::PANEL))
             .resizable(true)
-            .default_size(240.0)
-            .size_range(170.0..=420.0)
-            .show(ui, |ui| self.preset_panel(ui));
+            .default_size(290.0)
+            .size_range(min_left..=480.0)
+            .show(ui, |ui| self.left_panel(ui));
         egui::Panel::right("develop")
             .frame(panel(theme::PANEL))
             .resizable(true)
@@ -1527,6 +1836,10 @@ impl eframe::App for LumenApp {
         }
         self.run_script(&ctx);
         self.request_render(&ctx);
+        // The Eraser toggle of the Masks panel and the tool follow each other.
+        if matches!(self.tool, Tool::Brush | Tool::Eraser) {
+            self.tool = if self.mask_ui.brush.erase { Tool::Eraser } else { Tool::Brush };
+        }
         self.request_preset_thumbs();
         self.update_title(&ctx);
         if self.message.as_ref().is_some_and(|(_, at, _)| at.elapsed() < Duration::from_secs(9)) {

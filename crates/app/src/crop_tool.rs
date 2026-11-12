@@ -9,6 +9,7 @@ use raw::Orientation;
 use xmp::Crop;
 
 use crate::i18n::tr;
+use crate::viewer::ViewTool;
 
 /// English label, Italian label, long and short side (`None` = free,
 /// zeros = the photo's own).
@@ -253,6 +254,19 @@ impl CropTool {
             painter.rect_filled(egui::Rect::from_min_size(at - vec2(6.0, 3.0), galley.size() + vec2(12.0, 6.0)), 3.0, Color32::from_black_alpha(160));
             painter.galley(at, galley, Color32::WHITE);
         }
+    }
+}
+
+impl ViewTool for CropTool {
+    fn interact(&mut self, ui: &egui::Ui, resp: &Response, img: egui::Rect) -> (bool, bool) {
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        (true, CropTool::interact(self, resp, img))
+    }
+
+    fn paint(&self, _ui: &egui::Ui, painter: &Painter, img: egui::Rect) {
+        CropTool::paint(self, painter, img);
     }
 }
 

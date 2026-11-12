@@ -45,6 +45,8 @@ pub struct RenderJob {
     pub draft: bool,
     /// Also render at full resolution (the view is zoomed past the preview).
     pub detail: bool,
+    /// Show this mask in red over the photo.
+    pub overlay: Option<usize>,
 }
 
 /// Per-channel 256-bin histogram of the displayed (sRGB 8-bit) image.
@@ -273,7 +275,7 @@ impl WorkerState {
                 Task::Pick(generation, point) => self.pick_white(generation, point),
                 Task::Auto(generation, edit) => self.auto_tone(generation, &edit),
                 Task::Thumb(generation, job) => {
-                    let render = RenderJob { id: 0, generation, edit: job.edit, draft: false, detail: false };
+                    let render = RenderJob { id: 0, generation, edit: job.edit, draft: false, detail: false, overlay: None };
                     if let Some(d) = self.develop(&render, Quality::Thumb) {
                         let (image, _) = to_color_image(&d.img);
                         self.send(Event::PresetThumb { generation, key: job.key, image });
@@ -335,7 +337,7 @@ impl WorkerState {
         open.before_crop = Some(crop.clone());
         let mut edit = Edit::defaults(SourceKind::of(&open.preview));
         edit.settings.crop = crop.clone();
-        let before = RenderJob { id: 0, generation, edit, draft: false, detail: false };
+        let before = RenderJob { id: 0, generation, edit, draft: false, detail: false, overlay: None };
         if let Some(d) = self.develop(&before, Quality::Preview) {
             let (image, _) = to_color_image(&d.img);
             self.send(Event::Before { generation, image });
@@ -383,7 +385,7 @@ impl WorkerState {
         let mut edit = edit.clone();
         edit.settings.basic = Basic::default();
         edit.settings.effects.grain_amount = 0.0;
-        let job = RenderJob { id: 0, generation, edit, draft: true, detail: false };
+        let job = RenderJob { id: 0, generation, edit, draft: true, detail: false, overlay: None };
         let Some(d) = self.develop(&job, Quality::Draft) else { return };
         let rgb = raw::encode_srgb8(&d.img, 0.0);
         let basic = crate::auto::auto_tone(&crate::auto::luma8(&rgb));
@@ -451,6 +453,11 @@ impl WorkerState {
         };
         let mut img = pipeline.render(photo, &RenderOptions { max_size, full_size: Some(open.full_size) });
         pipeline.grain(&mut img);
+        if let Some(w) = job.overlay.and_then(|i| pipeline.mask_overlay(photo, i, img.width, img.height)) {
+            // Red at half strength where the mask is.
+            let red = [0.75f32, 0.05, 0.05];
+            img.pixels.iter_mut().zip(&w).for_each(|(p, &w)| *p = std::array::from_fn(|c| p[c] + (red[c] - p[c]) * w * 0.55));
+        }
 
         let temp_tint = |xy| {
             let tt = TempTint::from_xy(xy);

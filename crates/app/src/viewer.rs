@@ -4,9 +4,22 @@
 
 use eframe::egui::{self, pos2, vec2, Color32, Rect, Sense, TextureHandle, Ui, Vec2};
 
-use crate::crop_tool::CropTool;
 use crate::i18n::tr;
+use crate::icons::{icon_button, Icon};
 use crate::theme;
+
+/// A tool working on the shown image (crop, masks).
+pub trait ViewTool {
+    /// Handles the pointer on the image at `img` (screen rect). Returns
+    /// whether the tool took the drag (no panning) and whether it changed
+    /// something.
+    fn interact(&mut self, ui: &Ui, resp: &egui::Response, img: Rect) -> (bool, bool);
+    fn paint(&self, ui: &Ui, painter: &egui::Painter, img: Rect);
+    /// The wheel resizes something instead of panning.
+    fn takes_scroll(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Zoom {
@@ -35,11 +48,24 @@ pub struct Viewer {
     /// Split divider, as a fraction of the view width.
     split: f32,
     dragging_divider: bool,
+    /// Zoom shown last frame (physical pixels per image pixel) and the
+    /// fit zoom, for the toolbar's − / + / percentage.
+    last_ratio: f32,
+    fit_ratio: f32,
 }
 
 impl Default for Viewer {
     fn default() -> Self {
-        Viewer { zoom: Zoom::Fit, center: vec2(0.5, 0.5), show_before: false, compare: Compare::Single, split: 0.5, dragging_divider: false }
+        Viewer {
+            zoom: Zoom::Fit,
+            center: vec2(0.5, 0.5),
+            show_before: false,
+            compare: Compare::Single,
+            split: 0.5,
+            dragging_divider: false,
+            last_ratio: 1.0,
+            fit_ratio: 1.0,
+        }
     }
 }
 
@@ -62,8 +88,8 @@ pub struct ViewOutput {
     pub wants_detail: bool,
     /// Point clicked with the eyedropper, in fractions of the shown image.
     pub picked: Option<(f32, f32)>,
-    /// The crop tool changed the rectangle or the angle.
-    pub crop_changed: bool,
+    /// The tool on the image changed something.
+    pub tool_changed: bool,
 }
 
 impl Viewer {
@@ -74,25 +100,57 @@ impl Viewer {
 
     pub fn toolbar(&mut self, ui: &mut Ui, has_photo: bool) {
         ui.add_enabled_ui(has_photo, |ui| {
-            if ui.selectable_label(self.zoom == Zoom::Fit, tr("Fit", "Adatta")).clicked() {
-                self.zoom = Zoom::Fit;
-            }
-            for (label, r) in [("100%", 1.0), ("200%", 2.0)] {
-                if ui.selectable_label(self.zoom == Zoom::Ratio(r), label).clicked() {
-                    self.zoom = Zoom::Ratio(r);
-                }
-            }
+            self.zoom_control(ui);
             ui.separator();
-            ui.toggle_value(&mut self.show_before, tr("Before  \\", "Prima  \\"))
-                .on_hover_text(tr("Show the photo without edits (\\ key)", "Mostra la foto senza modifiche (tasto \\)"));
-            ui.label(egui::RichText::new(tr("Compare", "Confronto")).color(theme::TEXT_DIM));
-            for (mode, en, it) in [(Compare::Single, "Off", "No"), (Compare::Split, "Split", "Tendina"), (Compare::SideBySide, "Side by side", "Affiancate")] {
-                ui.selectable_value(&mut self.compare, mode, tr(en, it));
+            if icon_button(ui, Icon::Before, self.show_before, tr("Before: the photo without edits (\\)", "Prima: la foto senza modifiche (\\)")).clicked() {
+                self.show_before = !self.show_before;
+            }
+            for (mode, icon, en, it) in [
+                (Compare::Single, Icon::Single, "Single view", "Vista singola"),
+                (Compare::Split, Icon::Split, "Before / after split: drag the divider", "Prima / dopo a tendina: trascina la linea"),
+                (Compare::SideBySide, Icon::SideBySide, "Before / after side by side", "Prima / dopo affiancate"),
+            ] {
+                if icon_button(ui, icon, self.compare == mode, tr(en, it)).clicked() {
+                    self.compare = mode;
+                }
             }
         });
     }
 
-    pub fn show(&mut self, ui: &mut Ui, input: &ViewInput, mut crop: Option<&mut CropTool>) -> ViewOutput {
+    /// Fit, −, the zoom in percent (with common values) and +.
+    fn zoom_control(&mut self, ui: &mut Ui) {
+        if ui.selectable_label(self.zoom == Zoom::Fit, tr("Fit", "Adatta")).on_hover_text(tr("Fit the photo in the view (Z)", "Adatta la foto alla vista (Z)")).clicked() {
+            self.zoom = Zoom::Fit;
+        }
+        let step = 1.25;
+        if ui.button("−").on_hover_text(tr("Zoom out", "Riduci")).clicked() {
+            self.set_ratio(self.last_ratio / step);
+        }
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("zoom")
+            .width(58.0)
+            .selected_text(format!("{:.0}%", self.last_ratio * 100.0))
+            .show_ui(ui, |ui| {
+                for p in [25.0f32, 50.0, 100.0, 200.0, 400.0] {
+                    if ui.selectable_label((self.last_ratio * 100.0 - p).abs() < 0.5, format!("{p:.0}%")).clicked() {
+                        chosen = Some(p / 100.0);
+                    }
+                }
+            });
+        if let Some(r) = chosen {
+            self.set_ratio(r);
+        }
+        if ui.button("+").on_hover_text(tr("Zoom in", "Ingrandisci")).clicked() {
+            self.set_ratio(self.last_ratio * step);
+        }
+    }
+
+    /// A zoom ratio; at or below the fit one it is Fit.
+    pub fn set_ratio(&mut self, r: f32) {
+        self.zoom = if r <= self.fit_ratio * 1.001 { Zoom::Fit } else { Zoom::Ratio(r.min(8.0)) };
+    }
+
+    pub fn show(&mut self, ui: &mut Ui, input: &ViewInput, mut tool: Option<&mut dyn ViewTool>) -> ViewOutput {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
@@ -105,7 +163,7 @@ impl Viewer {
             return out;
         };
         let before = input.before.unwrap_or(after);
-        let compare = if crop.is_some() { Compare::Single } else { self.compare };
+        let compare = if tool.is_some() { Compare::Single } else { self.compare };
 
         // One pane, or two side by side sharing zoom and position.
         let panes: Vec<Rect> = match compare {
@@ -125,14 +183,24 @@ impl Viewer {
         let fit = (view.width() / w).min(view.height() / h);
         let max_scale = 8.0 / ppp;
         let mut scale = match self.zoom {
-            Zoom::Fit => fit,
-            Zoom::Ratio(r) => r / ppp,
+            Zoom::Ratio(r) if r / ppp > fit => r / ppp,
+            _ => {
+                self.zoom = Zoom::Fit;
+                fit
+            }
         };
 
         // Zoom around the cursor (pinch, Ctrl/Cmd + wheel); pan with the
         // wheel or by dragging.
         if resp.hovered() {
-            let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta()));
+            let (mut zoom, mut scroll, alt) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta(), i.modifiers.alt));
+            // Alt (⌥ on macOS) + wheel zooms too; egui already turns a
+            // trackpad pinch and Ctrl/⌘ + wheel into a zoom.
+            if alt && scroll != Vec2::ZERO {
+                let amount = if scroll.y != 0.0 { scroll.y } else { scroll.x };
+                zoom *= (amount * 0.004).exp();
+                scroll = Vec2::ZERO;
+            }
             if zoom != 1.0 {
                 let new = (scale * zoom).clamp(fit.min(max_scale), max_scale);
                 if let Some(p) = resp.hover_pos() {
@@ -143,7 +211,7 @@ impl Viewer {
                 }
                 scale = new;
                 self.zoom = if (scale - fit).abs() < 1e-4 { Zoom::Fit } else { Zoom::Ratio(scale * ppp) };
-            } else if scroll != Vec2::ZERO && self.zoom != Zoom::Fit {
+            } else if scroll != Vec2::ZERO && self.zoom != Zoom::Fit && !tool.as_ref().is_some_and(|t| t.takes_scroll()) {
                 self.center -= scroll / (full * scale);
             }
         }
@@ -155,18 +223,24 @@ impl Viewer {
         let size = full * scale;
         let img_in = |pane: Rect, this: &Viewer| Rect::from_min_size(this.image_min(pane, size), size);
 
-        if let Some(tool) = crop.as_deref_mut() {
-            out.crop_changed = tool.interact(&resp, img_in(pane, self));
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-            }
+        let mut taken = false;
+        if let Some(tool) = tool.as_deref_mut() {
+            let (t, changed) = tool.interact(ui, &resp, img_in(pane, self));
+            taken = t;
+            out.tool_changed = changed;
+        }
+        if taken {
+            // The tool sets its own cursor.
         } else if resp.dragged() && self.dragging_divider {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.split = ((p.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        } else if resp.dragged() && self.zoom != Zoom::Fit {
-            self.center -= resp.drag_delta() / (full * scale);
+        } else if resp.dragged() && !input.picking {
+            // The hand: drag to move the photo (when it is larger than the view).
+            if self.zoom != Zoom::Fit {
+                self.center -= resp.drag_delta() / (full * scale);
+            }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if resp.hovered() {
             let near_divider = compare == Compare::Split && pointer.is_some_and(|p| (p.x - divider_x).abs() < 8.0);
@@ -174,13 +248,11 @@ impl Viewer {
                 egui::CursorIcon::Crosshair
             } else if near_divider {
                 egui::CursorIcon::ResizeHorizontal
-            } else if self.zoom == Zoom::Fit {
-                egui::CursorIcon::ZoomIn
             } else {
                 egui::CursorIcon::Grab
             });
         }
-        if resp.clicked() && crop.is_none() && !self.dragging_divider {
+        if resp.clicked() && tool.is_none() && !self.dragging_divider {
             let p = resp.interact_pointer_pos();
             if input.picking {
                 if let Some(p) = p {
@@ -190,18 +262,10 @@ impl Viewer {
                         out.picked = Some((u, v));
                     }
                 }
-            } else if self.zoom == Zoom::Fit {
-                if let Some(p) = p {
-                    let fitted = full * fit;
-                    self.center = ((p - self.image_min(pane, fitted)) / fitted).clamp(Vec2::ZERO, Vec2::splat(1.0));
-                }
-                self.zoom = Zoom::Ratio(1.0);
-                scale = 1.0 / ppp;
-            } else {
-                self.zoom = Zoom::Fit;
-                scale = fit;
             }
         }
+        self.last_ratio = scale * ppp;
+        self.fit_ratio = fit * ppp;
 
         let size = full * scale;
         // Keep the image filling the view on each axis where it is larger.
@@ -213,7 +277,7 @@ impl Viewer {
         let img_rect = |pane: Rect| Rect::from_min_size(self.image_min(pane, size), size);
         match compare {
             Compare::Single => {
-                let tex = if self.show_before && crop.is_none() { before } else { after };
+                let tex = if self.show_before && tool.is_none() { before } else { after };
                 painter.image(tex.id(), img_rect(rect), uv, Color32::WHITE);
             }
             Compare::Split => {
@@ -234,15 +298,15 @@ impl Viewer {
                 }
             }
         }
-        if let Some(tool) = crop.as_deref() {
-            tool.paint(&painter, img_rect(rect));
+        if let Some(tool) = tool.as_deref() {
+            tool.paint(ui, &painter, img_rect(rect));
         }
 
         out.wants_detail = size.x * ppp > input.preview_width as f32 * 1.05;
 
-        let pct = format!("{:.0}%", scale * ppp * 100.0);
-        let badge = if self.show_before && compare == Compare::Single && crop.is_none() { format!("{} · {pct}", tr("Before", "Prima")) } else { pct };
-        label(&painter, rect.left_top() + vec2(10.0, 10.0), &badge);
+        if self.show_before && compare == Compare::Single && tool.is_none() {
+            label(&painter, rect.left_top() + vec2(10.0, 10.0), tr("Before", "Prima"));
+        }
         if input.picking {
             label(&painter, rect.center_top() + vec2(-150.0, 10.0), tr("Click a neutral grey or white point (Esc to cancel)", "Clic su un punto grigio o bianco neutro (Esc per annullare)"));
         }

@@ -6,7 +6,9 @@
 //!   ─ calibration ─ exposure ─ shoulder (raw)
 //!   → Melissa: profile curve ─ profile RGB table ─ Basic tone ─ parametric
 //!     ─ point curves ─ shadow tint                                  (pass A)
-//!   → colour NR ─ Texture/Clarity ─ Dehaze ─ sharpening ─ vignette  (spatial)
+//!   → local corrections (masks): point-wise sliders
+//!   → colour NR ─ Texture/Clarity ─ Dehaze ─ sharpening
+//!     ─ local Texture/Clarity/Dehaze/Sharpness ─ vignette           (spatial)
 //!   → HSL ─ vibrance/saturation ─ colour grading ─ .cube LUT        (pass B)
 //!   → display-referred linear ProPhoto; grain is added after resizing
 //! ```
@@ -16,6 +18,7 @@ pub mod adobe;
 pub mod colour;
 pub mod geometry;
 pub mod local;
+pub mod masks;
 pub mod tone;
 
 use rayon::prelude::*;
@@ -113,6 +116,8 @@ pub struct Pipeline {
     colour: ColourOps,
     space: ColourSpace,
     cube: Option<(CubeFile, f32)>,
+    /// Local corrections that change something.
+    locals: Vec<masks::LocalOp>,
 }
 
 impl Pipeline {
@@ -172,6 +177,11 @@ impl Pipeline {
         if s.detail.luminance_nr > 0.0 {
             warnings.push("luminance noise reduction is not implemented yet".into());
         }
+        let locals: Vec<masks::LocalOp> = s.masks.iter().enumerate().filter_map(|(i, c)| masks::LocalOp::new(i, c)).collect();
+        let unsupported = s.masks.iter().filter(|c| !c.is_supported()).count();
+        if unsupported > 0 {
+            warnings.push(format!("{unsupported} mask(s) of a kind Lumen cannot render (AI or range masks) are kept but not applied"));
+        }
 
         Pipeline {
             settings: s.clone(),
@@ -188,6 +198,7 @@ impl Pipeline {
             colour: ColourOps::new(&s.hsl, s.presence.vibrance, s.presence.saturation, &s.color_grade),
             space: ColourSpace::new(),
             cube: None,
+            locals,
         }
     }
 
@@ -254,9 +265,22 @@ impl Pipeline {
         let px = img.width.max(img.height) as f32 / full as f32;
         // Cropping first: the post-crop vignette and the other spatial
         // operations then see the final frame.
+        let (canvas_w, canvas_h) = (img.width, img.height);
         let img = geometry::apply(img, &self.settings.crop, photo.info.orientation);
         let stage = self.profile_stage(photo, white);
-        self.process_with(img, self.exposure(photo) + stage.exposure_offset, px, &stage)
+        let weights = self.mask_weights(canvas_w, canvas_h, photo.info.orientation, img.width, img.height);
+        self.process_inner(img, self.exposure(photo) + stage.exposure_offset, px, &stage, &weights)
+    }
+
+    /// Weight maps of the local corrections that change something, for a
+    /// developed image of `out_w`×`out_h` from an oriented
+    /// `canvas_w`×`canvas_h` photo.
+    fn mask_weights(&self, canvas_w: usize, canvas_h: usize, o: raw::Orientation, out_w: usize, out_h: usize) -> Vec<Vec<f32>> {
+        let frame = masks::Frame::new(canvas_w, canvas_h, &self.settings.crop, o, out_w, out_h);
+        self.locals
+            .iter()
+            .map(|op| masks::correction_weights(&self.settings.masks[op.index], &frame).unwrap_or_else(|| vec![0.0; out_w * out_h]))
+            .collect()
     }
 
     /// Runs the pipeline on white-balanced linear ProPhoto. `px` is this
@@ -265,9 +289,34 @@ impl Pipeline {
         self.process_with(img, exposure, px, &ProfileStage::default())
     }
 
-    pub fn process_with(&self, mut img: Image, exposure: f32, px: f32, stage: &ProfileStage) -> Image {
+    pub fn process_with(&self, img: Image, exposure: f32, px: f32, stage: &ProfileStage) -> Image {
+        // Without a frame the masks cannot be placed: they are left out.
+        self.process_inner(img, exposure, px, stage, &[])
+    }
+
+    /// The shape of mask `index` (ignoring its Amount and on/off switch)
+    /// on a developed `out_w`×`out_h` image of `photo`, for an overlay.
+    pub fn mask_overlay(&self, photo: &Photo, index: usize, out_w: usize, out_h: usize) -> Option<Vec<f32>> {
+        let c = self.settings.masks.get(index)?;
+        let shown = xmp::masks::LocalCorrection { amount: 1.0, active: true, ..c.clone() };
+        let frame = masks::Frame::new(photo.data.width, photo.data.height, &self.settings.crop, photo.info.orientation, out_w, out_h);
+        masks::correction_weights(&shown, &frame)
+    }
+
+    /// `weights` holds one map per entry of `self.locals` (or none at all).
+    fn process_inner(&self, mut img: Image, exposure: f32, px: f32, stage: &ProfileStage, weights: &[Vec<f32>]) -> Image {
         let gain = 2f32.powf(exposure);
         img.pixels.par_iter_mut().for_each(|p| *p = self.pass_a(*p, gain, stage));
+        let locals: Vec<(&masks::LocalOp, &Vec<f32>)> = self.locals.iter().zip(weights).collect();
+        if !locals.is_empty() {
+            img.pixels.par_iter_mut().enumerate().for_each(|(i, p)| {
+                for (op, w) in &locals {
+                    if w[i] > 0.0 {
+                        *p = op.point(*p, w[i]);
+                    }
+                }
+            });
+        }
 
         let s = &self.settings;
         local::color_nr(&mut img, s.detail.color_nr, px);
@@ -279,6 +328,9 @@ impl Pipeline {
         }
         let d = &s.detail;
         local::sharpen(&mut img, d.sharpness, d.sharpen_radius, d.sharpen_detail, d.sharpen_edge_masking, px);
+        for (op, w) in &locals {
+            op.spatial(&mut img, w, px);
+        }
         let e = &s.effects;
         local::vignette(&mut img, e.vignette_amount, e.vignette_midpoint, e.vignette_roundness, e.vignette_feather);
 
@@ -458,6 +510,26 @@ mod tests {
         assert!(corner < centre * 0.6, "{corner} {centre}");
         let (left_edge, right_edge) = (out.get(1, 50)[1], out.get(98, 50)[1]);
         assert!((left_edge - right_edge).abs() < 0.02, "{left_edge} {right_edge}");
+    }
+
+    #[test]
+    fn masks_act_where_they_are() {
+        use xmp::masks::{LocalCorrection, MaskComponent, MaskShape};
+        let photo = Photo { info: raw::PhotoInfo::default(), data: Image::from_fn(100, 100, |_, _| [0.18; 3]), color: ColorSource::Working };
+        let mut s = DevelopSettings::default();
+        s.detail.sharpness = 0.0;
+        s.detail.color_nr = 0.0;
+        // Top half brighter by a gradient that is full above y = 0.4.
+        let mut c = LocalCorrection::new("sky", vec![MaskComponent::new(MaskShape::Linear { zero: (0.5, 0.6), full: (0.5, 0.4) })]);
+        c.adjust.exposure = 1.0;
+        s.masks.push(c);
+        let p = Pipeline::new(&s, SourceKind::Rendered);
+        let out = p.render(&photo, &RenderOptions::default());
+        let (top, bottom) = (out.get(50, 10)[1], out.get(50, 90)[1]);
+        assert!(top > bottom * 1.6, "{top} {bottom}");
+        assert!((bottom - 0.18).abs() < 0.01, "{bottom}");
+        let overlay = p.mask_overlay(&photo, 0, 100, 100).unwrap();
+        assert!(overlay[10 * 100] > 0.99 && overlay[90 * 100] < 0.01);
     }
 
     #[test]

@@ -16,15 +16,32 @@ The interface is in English, or in Italian when the operating system's language 
 
 | Area | Content |
 |---|---|
-| Menu | **File**: Open folder (⌘O / Ctrl+O), Open file, Preset folder, Load LUT, Save settings (⌘S / Ctrl+S), Export (⇧⌘E / Ctrl+Shift+E). **Edit**: Undo, Redo, Copy settings (⇧⌘C / Ctrl+Shift+C), Paste settings (⇧⌘V / Ctrl+Shift+V), Select all (⌘A / Ctrl+A), Reset all. **View**: Fit, 100%, Before/After, single / split / side-by-side view. **Tools**: Crop & straighten (R), White balance picker (W), Auto tone |
-| Left | presets of the chosen folder (`.xmp`, "mobile" `.dng`, `.cube`/`.3dl`), grouped by preset group or sub-folder, with search, each with a thumbnail of the open photo developed with it. Hovering a preset previews it; a click applies it to the open photo, or to every selected photo |
-| Centre | the photo: Fit / 100% / 200%; click to switch between fit and 100% at the clicked point, drag to pan, pinch or ⌘/Ctrl + wheel to zoom around the cursor. The toolbar above it has the comparison views, the crop tool and the white balance picker |
+| Menu | **File**: Open folder (⌘O / Ctrl+O), Open file, Preset folder, Load LUT, Save settings (⌘S / Ctrl+S), Export (⇧⌘E / Ctrl+Shift+E). **Edit**: Undo, Redo, Copy settings (⇧⌘C / Ctrl+Shift+C), Paste settings (⇧⌘V / Ctrl+Shift+V), Select all (⌘A / Ctrl+A), Reset all. **View**: Fit, 100%, Before/After, single / split / side-by-side view. **Tools**: Crop & straighten (R), Masks (M), White balance picker (W), Auto tone |
+| Left | two tabs. **Presets**: presets of the chosen folder (`.xmp`, "mobile" `.dng`, `.cube`/`.3dl`), grouped by preset group or sub-folder, with search, each with a thumbnail of the open photo developed with it. Hovering a preset previews it; a click applies it to the open photo, or to every selected photo |
+| Centre | the photo, with a hand cursor: drag (or scroll with two fingers) to move it when it is larger than the view. **Zoom** around the cursor with a trackpad pinch, Alt + wheel on Windows / ⌥ Option + wheel on macOS, or Ctrl/⌘ + wheel; or with the zoom control of the toolbar above (Fit, −, the percentage with 25–400%, +), or `Z` for fit/100%. The toolbar also has icons (names in the tooltips) for Before and the three comparison views; the **tool strip** on its left has the tools ([Tools](#tools)) |
+| Left, **Masks** tab (`M`) | local corrections: see [Masks](#masks) |
 | Right | RGB histogram with clipping marks and shooting data; preset **Amount**; panels Profile & LUT (amount of the profile and of the LUT), Basic (white balance presets and Temp/Tint, tone, presence), Tone curve (parametric, editable master points, R/G/B), HSL (8 bands × hue/saturation/luminance), Color grading (3-way and global wheels, Blending, Balance), Detail, Effects (vignette, grain), Calibration |
 | Bottom | filmstrip of the open folder and status bar with decode/develop times, notes (Adobe profiles in use, what is approximated) and export progress |
 
 Sliders: double-click the label or the track to reset; click the number to type a value, or drag on it. Double-clicking Temp./Tint goes back to the "As Shot" white balance. In the point curve: click on the curve to add a point, drag to move it, double-click to remove it.
 
-Other shortcuts (outside text fields): ⌘Z / Ctrl+Z undo, ⇧⌘Z / Ctrl+Shift+Z (or Ctrl+Y) redo, `Z` fit/100%, `R` crop, `W` white balance picker, ← → previous/next photo, Enter applies the crop, Esc cancels the crop or the picker and closes the export dialog. Folders, photos, `.xmp` presets and LUTs can be dropped on the window.
+Other shortcuts (outside text fields): ⌘Z / Ctrl+Z undo, ⇧⌘Z / Ctrl+Shift+Z (or Ctrl+Y) redo, `Z` fit/100%, `H` `R` `W` `B` `E` `L` `G` the tools, `M` presets / masks, `O` mask overlay, ← → previous/next photo, Enter applies the crop, Esc cancels the crop or the picker and closes the export dialog. Folders, photos, `.xmp` presets and LUTs can be dropped on the window.
+
+## Tools
+
+The vertical strip at the left of the photo holds the tools; one is active at a time, and clicking it again (or its key) goes back to Navigate. Esc too.
+
+| Icon | Tool | Key | What it does |
+|---|---|---|---|
+| four arrows | **Navigate** | H | the hand: drag to move the photo; the handles of the selected mask's gradients work here |
+| crop marks | **Crop & straighten** | R | see [Crop and straighten](#crop-and-straighten); choosing another tool applies the crop |
+| eyedropper | **White balance picker** | W | one click on a neutral point, then back to Navigate |
+| brush | **Mask brush** | B | paints on the selected mask's brush (a new mask with a brush if none is selected, a brush added to the selected mask if it has none); opens the Masks tab |
+| eraser | **Mask eraser** | E | erases with the same brush; Alt while painting erases too |
+| three lines | **Linear gradient** | L | adds a new mask with a linear gradient and goes back to Navigate, with its handles on the photo |
+| two circles | **Radial gradient** | G | the same with a radial gradient |
+
+Zoom works with every tool (pinch, Alt/⌥ + wheel, Ctrl/⌘ + wheel); with the brush or the eraser the plain wheel changes the brush size.
 
 ## Before and after
 
@@ -36,7 +53,7 @@ All three work with zoom and pan, which the two halves share. The "before" is th
 
 ## Crop and straighten
 
-`R`, the **Crop** button or Tools → Crop & straighten open the tool. The photo is shown whole and straightened, with the frame on top:
+`R`, the crop icon of the tool strip or Tools → Crop & straighten open the tool. The photo is shown whole and straightened, with the frame on top:
 
 - drag the handles to resize, inside the frame to move it, **outside the frame to rotate** the photo (or use the Angle slider, −45..45°);
 - **Aspect**: free, the photo's original, 1:1, 4:5, 3:2, 16:9, landscape or portrait; corner handles keep the ratio;
@@ -47,8 +64,23 @@ The crop is stored with Lightroom's keys (`crs:HasCrop`, `CropTop/Left/Bottom/Ri
 
 ## White balance picker and Auto
 
-- **Picker** (`W`, or the button in the Basic panel): click a point that should be neutral grey or white. The worker averages a small area around it in the photo's own data: for raw files it finds the white point of the camera data through the camera profile (`ColorProfile::neutral_to_xy`) and sets Temperature/Tint; for JPEG/PNG/TIFF it sets the relative Temperature/Tint that bring that colour to neutral. Clipped points are ignored. One undo step.
+- **Picker** (`W`, the eyedropper of the tool strip, or the button in the Basic panel): click a point that should be neutral grey or white. The worker averages a small area around it in the photo's own data: for raw files it finds the white point of the camera data through the camera profile (`ColorProfile::neutral_to_xy`) and sets Temperature/Tint; for JPEG/PNG/TIFF it sets the relative Temperature/Tint that bring that colour to neutral. Clipped points are ignored. One undo step.
 - **Auto** (Basic panel or Tools): the photo is developed small with the tone sliders at zero and its lightness sets Exposure, Contrast, Highlights, Shadows, Whites and Blacks with a simple heuristic ([`auto.rs`](../crates/app/src/auto.rs)): exposure brings the median to 0.45; highlights pull down when more than 3% of the picture is above 0.9, shadows lift when more than 15% is below 0.15; whites and blacks stretch the ends to 0.97/0.03 (whites also pull back clipping); contrast aims at a 10–90% spread of 0.55. It is not Adobe's Auto. One undo step.
+
+## Masks
+
+The **Masks** tab of the left panel (`M`, or Tools → Masks) applies a set of sliders to part of the photo; the develop panels on the right stay as they are.
+
+- **New**: Linear, Radial or Brush creates a mask with that component and selects it. The list shows every mask with a switch to turn its effect on and off, its name (editable), and × to delete it. Masks Lumen cannot render (AI subject/sky masks, range masks made in Lightroom) are marked ⚠: they stay in the file untouched but are not applied.
+- **Components**: a mask can hold several; **Add ▾**, **Subtract ▾** and **Intersect ▾** add a linear gradient, a radial gradient or a brush with that mode. Each component can be inverted (Inv.) or removed; the one selected in the list is the one the handles and the brush work on.
+- **On the photo**, while the Masks tab is open and a mask is selected:
+  - *linear gradient*: three lines, from no effect to full effect; drag the outer handles to move each end, the middle one to move the whole gradient;
+  - *radial gradient*: the ellipse and its soft inner edge (dashed); drag the centre to move it, the right and bottom handles to resize, the handle above it to rotate; Feather in the panel;
+  - *brush*: with the **Brush** tool (`B`) drag to paint; the **Eraser** tool (`E`), Alt or **Eraser** in the panel erase; the wheel or `[` `]` change the size; Size, Feather and Flow in the panel. Each drag is one stroke and one undo step. With Navigate the brush does not paint, so the photo can be moved.
+- **Overlay** (`O`): the selected mask in red over the photo.
+- **Amount** scales the whole mask; the sliders are Temp., Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Saturation, Texture, Clarity, Dehaze, Sharpness.
+
+Masks are part of the edit: undo/redo, autosave in the sidecar, copy/paste and presets carry them. They are stored with Lightroom's keys ([xmp-format.md §8](xmp-format.md#8-local-corrections-masks), which says what is verified and what is assumed) and positioned on the uncropped photo, so they stay on the subject when the crop changes. How they are computed: [pipeline.md](pipeline.md#masks).
 
 ## Preset thumbnails
 
@@ -104,4 +136,4 @@ With a script running the app prints the time of each render and each exported f
 
 - No catalogue: the app works on folders; edits live in the sidecars.
 - RAW thumbnails come from the preview embedded in the file: they ignore the EXIF orientation and do not show the edits.
-- No lens correction, masks, Optics/Geometry panels.
+- No lens correction, Optics/Geometry panels, AI masks or range masks (these are kept, not applied).

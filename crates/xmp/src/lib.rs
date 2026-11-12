@@ -4,6 +4,7 @@
 
 mod container;
 pub mod look_table;
+pub mod masks;
 mod packet;
 pub mod rgb_table;
 mod settings;

@@ -8,8 +8,10 @@ It opens RAW files from most cameras (DNG, CR2/CR3, NEF, ARW, RW2, RAF, ORF…) 
 
 - **Presets on the left**: pick a folder of presets; hovering one previews it on the photo, a click applies it. An **Amount** slider (0–200%) then sets the strength of the preset, as in Lightroom.
 - **The photo in the centre**: fit or 100%/200% zoom, pan, zoom around the cursor, before/after with `\`, a split view with a draggable divider or the two side by side, RGB histogram with clipping marks.
+- **A tool strip** next to the photo: navigate, crop, white balance picker, mask brush and eraser, linear and radial gradients, each with a one-letter shortcut.
 - **Crop and straighten** (`R`): handles, aspect ratios (free, original, 1:1, 4:5, 3:2, 16:9, landscape or portrait), angle −45..45°; stored with Lightroom's crop keys.
 - **White balance picker** (`W`) and **Auto** tone, and a thumbnail of the photo with each preset in the preset list.
+- **Masks**: linear and radial gradients and a brush with eraser, combined by adding, subtracting or intersecting, each with its own exposure, contrast, highlights, shadows, whites, blacks, temperature, tint, saturation, texture, clarity, dehaze and sharpness; a red overlay (`O`) shows where they act. They are read from and written to Lightroom's XMP masks.
 - **Develop panels on the right**: Profile & LUT, Basic (white balance, tone, presence), Tone curve (parametric and point, R/G/B), HSL, Color grading wheels, Detail (sharpening, noise reduction), Effects (vignette, grain), Calibration.
 - **Filmstrip at the bottom**: the photos of the open folder, with their file type, an *edited* badge and a mark on JPEGs that were already produced by Lightroom or Photoshop.
 - **Several photos at once**: select with ⌘/Ctrl-click, ⇧-click or ⌘A / Ctrl+A, then apply a preset, paste copied settings or export them all together.

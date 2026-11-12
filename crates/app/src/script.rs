@@ -13,7 +13,8 @@
 //! before on|off             before/after view
 //! zoom fit|100|200
 //! panel <key>               open only this develop panel: profile, basic, curve,
-//!                           hsl, grading, detail, effects, calibration
+//!                           hsl, grading, detail, effects, calibration; or the
+//!                           left panel's tab: presets, masks
 //! tab curve|hsl|grading <n> select a tab inside a panel
 //! amount <0..200>           strength of the preset just applied (%)
 //! exportdialog | closedialog
@@ -31,6 +32,19 @@
 //! compare off|split|side    before/after view
 //! pick <u> <v>              white balance eyedropper at (u, v) of the shown photo
 //! auto                      Auto tone
+//! overlay on|off            red overlay of the selected mask
+//! tool navigate|crop|picker|brush|eraser|linear|radial   the tool strip
+//! mask new linear|radial|brush          a new mask, selected
+//! mask select <n> | mask component <n>  select a mask / one of its components
+//! mask add|sub|int linear|radial|brush  add a component to the selected mask
+//! mask linear <zx> <zy> <fx> <fy>       gradient points (fractions of the photo)
+//! mask radial <top> <left> <bottom> <right> [angle] [feather]
+//! mask brush <size %> [feather] [flow]
+//! mask paint <x0> <y0> <x1> <y1> [erase] a brush stroke along a segment
+//! mask set <slider> <value>             exposure, contrast, highlights, shadows,
+//!                                       whites, blacks, temperature, tint,
+//!                                       saturation, texture, clarity, dehaze, sharpness
+//! mask amount <0..100> | mask delete
 //! shot <file.png>           save a screenshot of the window
 //! quit
 //! ```
@@ -94,6 +108,9 @@ pub enum Step {
     Compare(crate::viewer::Compare),
     Pick(f32, f32),
     Auto,
+    Overlay(bool),
+    Tool(crate::app::Tool),
+    Mask(Vec<String>),
     Quit,
 }
 
@@ -205,6 +222,17 @@ impl Script {
             }),
             "pick" if rest.len() == 2 => Step::Pick(rest[0].parse().unwrap_or(0.5), rest[1].parse().unwrap_or(0.5)),
             "auto" => Step::Auto,
+            "overlay" => Step::Overlay(arg != "off"),
+            "tool" => Step::Tool(match arg.as_str() {
+                "crop" => crate::app::Tool::Crop,
+                "picker" => crate::app::Tool::Picker,
+                "brush" => crate::app::Tool::Brush,
+                "eraser" => crate::app::Tool::Eraser,
+                "linear" => crate::app::Tool::Linear,
+                "radial" => crate::app::Tool::Radial,
+                _ => crate::app::Tool::Navigate,
+            }),
+            "mask" => Step::Mask(rest.iter().map(|s| s.to_string()).collect()),
             "next" => Step::Photo(1),
             "prev" => Step::Photo(-1),
             "shot" => {

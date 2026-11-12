@@ -369,6 +369,38 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_with_masks_reads_back_the_same() {
+        use xmp::masks::{BlendMode, LocalCorrection, MaskComponent, MaskShape, Stroke};
+        let dir = std::env::temp_dir().join(format!("lumen-masks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("P1.RW2");
+        let mut edit = Edit::defaults(SourceKind::Raw);
+        let mut sky = LocalCorrection::new("Sky", vec![MaskComponent::new(MaskShape::Linear { zero: (0.5, 0.55), full: (0.5, 0.25) })]);
+        sky.adjust.exposure = -1.5;
+        sky.adjust.temperature = -30.0;
+        let mut brush = MaskComponent::new(MaskShape::Brush {
+            strokes: vec![Stroke { erase: false, radius: 0.04, flow: 1.0, center_weight: 0.5, dabs: vec![(0.15, 0.85), (0.16, 0.84)], extra: Props::default() }],
+        });
+        brush.mode = BlendMode::Subtract;
+        let mut subject = LocalCorrection::new(
+            "Subject",
+            vec![MaskComponent::new(MaskShape::Radial { top: 0.35, left: 0.3, bottom: 0.75, right: 0.65, angle: 20.0, feather: 60.0, roundness: 0.0, midpoint: 50.0 }), brush],
+        );
+        subject.amount = 0.8;
+        subject.adjust.shadows = 40.0;
+        edit.settings.masks = vec![sky, subject];
+        save_sidecar(&photo, &edit).unwrap();
+        let back = load_sidecar(&photo, SourceKind::Raw).unwrap();
+        assert_eq!(back.settings.masks, edit.settings.masks);
+        assert_eq!(back.settings, edit.settings);
+        // Saving what was read gives the same file.
+        let first = std::fs::read_to_string(dir.join("P1.xmp")).unwrap();
+        save_sidecar(&photo, &back).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("P1.xmp")).unwrap(), first);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn sidecar_keeps_the_lut() {
         let dir = std::env::temp_dir().join(format!("lumen-sidecar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -338,6 +338,8 @@ pub struct DevelopSettings {
     pub detail: Detail,
     pub effects: Effects,
     pub crop: Crop,
+    /// Local corrections (masks), in file order.
+    pub masks: Vec<crate::masks::LocalCorrection>,
     pub look: Option<Look>,
     /// Profile-level RGB table when the preset *is* a profile.
     pub rgb_table: Option<RgbTable>,
@@ -362,6 +364,7 @@ impl Default for DevelopSettings {
             detail: Detail::default(),
             effects: Effects::default(),
             crop: Crop::default(),
+            masks: Vec::new(),
             look: None,
             rgb_table: None,
         }
@@ -520,6 +523,10 @@ impl DevelopSettings {
         if let Some(c) = props.crs("HasCrop").and_then(Value::as_bool) {
             self.crop.has_crop = c;
         }
+        // Masks come as a whole: a packet that has any replaces them.
+        if crate::masks::MaskContainer::ALL.iter().any(|c| props.crs(c.key()).is_some()) {
+            self.masks = crate::masks::read_corrections(props);
+        }
     }
 
     /// Writes every typed setting into `props` (sidecar style: complete,
@@ -545,6 +552,7 @@ impl DevelopSettings {
             props.set_crs(key, num(v));
         }
         props.set_crs("HasCrop", Value::Text(if self.crop.has_crop { "True" } else { "False" }.into()));
+        crate::masks::write_corrections(&self.masks, props);
         for (i, band) in HSL_BANDS.iter().enumerate() {
             props.set_crs(&format!("HueAdjustment{band}"), num(self.hsl.hue[i]));
             props.set_crs(&format!("SaturationAdjustment{band}"), num(self.hsl.saturation[i]));
@@ -564,6 +572,7 @@ impl DevelopSettings {
     pub fn is_known_key(key: &str) -> bool {
         const OTHER: &[&str] = &[
             "ProcessVersion", "WhiteBalance", "Temperature", "Tint", "ToneCurveName2012", "Look", "RGBTable", "HasCrop",
+            "MaskGroupBasedCorrections", "GradientBasedCorrections", "CircularGradientBasedCorrections", "PaintBasedCorrections",
             "Name", "ShortName", "SortName", "Group", "Description", "UUID", "PresetType", "Cluster", "Version",
             "HasSettings", "Copyright", "ContactInfo", "CameraModelRestriction", "SupportsAmount", "SupportsAmount2",
             "SupportsColor", "SupportsMonochrome", "SupportsHighDynamicRange", "SupportsNormalDynamicRange",
