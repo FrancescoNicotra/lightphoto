@@ -356,16 +356,11 @@ mod tests {
         assert_eq!(p, PathBuf::from("/photos/P1-Dreamy-2048.jpg"));
     }
 
-    /// Full export of the sample RW2 with the sample preset, if present.
+    /// Full export of the sample RAW with the sample preset.
     #[test]
     fn exports_the_sample_raw() {
-        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        let photo = root.join("samples/pixls/P1010041.RW2");
-        if !photo.exists() {
-            eprintln!("skipping: {} not found", photo.display());
-            return;
-        }
-        let preset = xmp::Preset::load(root.join("samples/Dreamy days in spring.xmp")).unwrap();
+        let photo = test_samples::gx80().raw;
+        let preset = xmp::Preset::load(test_samples::require("Dreamy days in spring.xmp")).unwrap();
         let mut edit = Edit::defaults(SourceKind::Raw);
         edit.apply_preset(&preset, "Dreamy").unwrap();
         let dir = std::env::temp_dir().join(format!("lumen-app-export-{}", std::process::id()));
@@ -378,7 +373,8 @@ mod tests {
             ..Default::default()
         };
         let (out, size) = run_export(&photo, &edit, &settings, &AdobeProfiles::default()).unwrap();
-        assert_eq!(out, dir.join("P1010041-Dreamy-800.jpg"));
+        let stem = photo.file_stem().unwrap().to_str().unwrap();
+        assert_eq!(out, dir.join(format!("{stem}-Dreamy-800.jpg")));
         assert_eq!(size[0].max(size[1]), 800);
         let back = image::open(&out).unwrap();
         assert_eq!((back.width() as usize, back.height() as usize), (size[0], size[1]));

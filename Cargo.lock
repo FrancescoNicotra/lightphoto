@@ -237,6 +237,7 @@ dependencies = [
  "raw",
  "rfd",
  "sys-locale",
+ "test-samples",
  "xmp",
 ]
 
@@ -3021,6 +3022,7 @@ dependencies = [
  "lut",
  "raw",
  "rayon",
+ "test-samples",
  "xmp",
 ]
 
@@ -3215,6 +3217,7 @@ dependencies = [
  "image",
  "rawler",
  "rayon",
+ "test-samples",
  "xmp",
 ]
 
@@ -3802,6 +3805,10 @@ checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "test-samples"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
@@ -4961,6 +4968,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "roxmltree 0.20.0",
+ "test-samples",
 ]
 
 [[package]]

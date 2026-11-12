@@ -1,24 +1,18 @@
-//! The "Dreamy days in spring" preset on the GX80 sample (skipped when the
-//! files in samples/pixls are missing; see crates/raw/tests/samples.rs).
+//! The "Dreamy days in spring" preset on the GX80 sample (see the
+//! `test-samples` crate: the full files in samples/pixls when present, else
+//! the versioned crops in samples/ci).
 //!
 //! - P1010041.RW2: the RAW, from raw.pixls.us (CC0);
 //! - P1010041-camera.jpg: its embedded camera JPEG (`lumen-cli preview`);
 //! - P1010041-camera-lightroom-dreamy.jpg: that JPEG with the preset applied
 //!   in Lightroom 12 for iOS, exported as sRGB JPEG at full size.
 
-use std::path::PathBuf;
-
 use pipeline::{Pipeline, RenderOptions, SourceKind};
 use raw::{DecodeOptions, Image, Photo};
+use test_samples::{require, Set};
 use xmp::{DevelopSettings, Preset};
 
-fn sample(name: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples").join(name);
-    p.exists().then_some(p).or_else(|| {
-        eprintln!("skipping: {name} not found in samples/");
-        None
-    })
-}
+const PRESET: &str = "Dreamy days in spring.xmp";
 
 /// Mean and standard deviation of luma, and mean blue − red, on sRGB values.
 fn stats(img: &Image) -> (f64, f64, f64) {
@@ -34,15 +28,19 @@ fn stats(img: &Image) -> (f64, f64, f64) {
 
 #[test]
 fn dreamy_preset_is_brighter_and_warmer() {
-    let Some(path) = sample("pixls/P1010041.RW2") else { return };
-    let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
-    let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let sample = test_samples::gx80();
+    let preset = Preset::load(require(PRESET)).unwrap();
+    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true }).unwrap();
     let opts = RenderOptions { max_size: Some(800), ..Default::default() };
 
     let plain = Pipeline::new(&DevelopSettings::default(), SourceKind::Raw).render(&photo, &opts);
     let dreamy_pipeline = Pipeline::new(&preset.settings, SourceKind::Raw);
     let dreamy = dreamy_pipeline.render(&photo, &opts);
-    assert_eq!((dreamy.width, dreamy.height), (800, 601));
+    let size = match sample.set {
+        Set::Full => (800, 601),
+        Set::Ci => (512, 384), // half size, smaller than 800
+    };
+    assert_eq!((dreamy.width, dreamy.height), size);
     assert!(dreamy.pixels.iter().flatten().all(|v| (0.0..=1.0).contains(v)));
 
     let (l0, sd0, cool0) = stats(&plain);
@@ -57,9 +55,9 @@ fn dreamy_preset_is_brighter_and_warmer() {
 
 #[test]
 fn preview_and_full_size_agree() {
-    let Some(path) = sample("pixls/P1010041.RW2") else { return };
-    let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
-    let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let sample = test_samples::gx80();
+    let preset = Preset::load(require(PRESET)).unwrap();
+    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true }).unwrap();
     let p = Pipeline::new(&preset.settings, SourceKind::Raw);
     let small = p.render(&photo, &RenderOptions { max_size: Some(400), ..Default::default() });
     let full = p.render(&photo, &RenderOptions::default()).downscale(400);
@@ -77,18 +75,24 @@ fn mean_delta_e(a: &Image, b: &Image) -> f64 {
 }
 
 /// The whole preset against Lightroom itself. Grain is random in both, so
-/// the images are compared at 480 px, where it averages out.
+/// the images are compared at a quarter of their size (480 px for the whole
+/// frame), where it averages out.
 #[test]
 fn matches_lightroom_on_the_camera_jpeg() {
-    let (Some(src), Some(reference)) = (sample("pixls/P1010041-camera.jpg"), sample("pixls/P1010041-camera-lightroom-dreamy.jpg")) else {
-        return;
-    };
-    let preset = Preset::load(sample("Dreamy days in spring.xmp").unwrap()).unwrap();
-    let photo = Photo::load(&src, &DecodeOptions::default()).unwrap();
-    let ours = Pipeline::new(&preset.settings, SourceKind::of(&photo)).render(&photo, &RenderOptions::default()).downscale(480);
-    let lightroom = Photo::load(&reference, &DecodeOptions::default()).unwrap().to_working(None).downscale(480);
+    let sample = test_samples::gx80();
+    let preset = Preset::load(require(PRESET)).unwrap();
+    let photo = Photo::load(&sample.camera_jpeg, &DecodeOptions::default()).unwrap();
+    let size = photo.data.width.max(photo.data.height) / 4;
+    let ours = Pipeline::new(&preset.settings, SourceKind::of(&photo)).render(&photo, &RenderOptions::default()).downscale(size);
+    let lightroom = Photo::load(&sample.lightroom_dreamy, &DecodeOptions::default()).unwrap().to_working(None).downscale(size);
     assert_eq!((ours.width, ours.height), (lightroom.width, lightroom.height));
     let de = mean_delta_e(&ours, &lightroom);
-    eprintln!("mean ΔE2000 vs Lightroom at 480 px: {de:.2}");
-    assert!(de < 3.0, "{de}");
+    eprintln!("mean ΔE2000 vs Lightroom at {size} px ({:?}): {de:.2}", sample.set);
+    // Measured: 2.86 on the whole frame, 3.13 on the crop (mostly water and
+    // foliage, where our HSL and grading differ most).
+    let limit = match sample.set {
+        Set::Full => 3.0,
+        Set::Ci => 3.3,
+    };
+    assert!(de < limit, "{de}");
 }

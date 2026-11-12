@@ -1,0 +1,12 @@
+# Text files keep LF in the repository; Windows checkouts may convert them.
+* text=auto
+
+# Sample photos and other binaries: never touched by line-ending conversion.
+*.dng binary
+*.DNG binary
+*.RW2 binary
+*.jpg binary
+*.JPG binary
+*.png binary
+*.tif binary
+*.dcp binary

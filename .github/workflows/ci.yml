@@ -1,0 +1,51 @@
+# Build, test and lint on macOS (Apple Silicon) and Windows (x86_64, MSVC).
+# The tests on real photos use the versioned crops in samples/ci: with
+# LUMEN_SAMPLES=ci a missing sample fails the run instead of being skipped.
+name: CI
+
+# Every push, on any branch (a pull request from a branch of this repository
+# shows the checks of its pushes); by hand from the Actions tab.
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  LUMEN_SAMPLES: ci
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+          - name: Windows (MSVC)
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
