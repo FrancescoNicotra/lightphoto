@@ -34,6 +34,15 @@ fn weights(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
         .collect()
 }
 
+/// Resizes to exactly `w`×`h`, taking the image (no copy when the size
+/// does not change).
+pub fn resize_owned(img: Image, w: usize, h: usize) -> Image {
+    if (w, h) == (img.width, img.height) {
+        return img;
+    }
+    resize(&img, w, h)
+}
+
 /// Resizes to exactly `w`×`h`.
 pub fn resize(img: &Image, w: usize, h: usize) -> Image {
     if (w, h) == (img.width, img.height) {

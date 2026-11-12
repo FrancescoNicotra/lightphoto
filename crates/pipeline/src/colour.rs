@@ -39,15 +39,7 @@ fn polar(a: f32, b: f32) -> (f32, f32) {
     (b.atan2(a).to_degrees().rem_euclid(360.0), a.hypot(b))
 }
 
-#[inline]
-fn signed_oetf(v: f32) -> f32 {
-    v.signum() * color::srgb_oetf(v.abs())
-}
-
-#[inline]
-fn signed_eotf(v: f32) -> f32 {
-    v.signum() * color::srgb_eotf(v.abs())
-}
+use crate::gamma::{signed_eotf, signed_oetf};
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -144,19 +136,21 @@ pub struct ColourOps {
     vibrance: f32,
     saturation: f32,
     grade: Option<ColorGrade>,
+    /// [`grade_delta`] sampled on luma 0..1: the colour grading depends on
+    /// luma alone, and its three exponentials are the costliest part.
+    grade_lut: Option<Vec<[f32; 3]>>,
 }
+
+const GRADE_LUT: usize = 1024;
 
 impl ColourOps {
     pub fn new(hsl: &Hsl, vibrance: f32, saturation: f32, grade: &ColorGrade) -> Self {
         let active = |w: &Wheel| w.sat != 0.0 || w.lum != 0.0;
         let hsl_active = hsl.hue.iter().chain(&hsl.saturation).chain(&hsl.luminance).any(|v| *v != 0.0);
         let grade_active = [&grade.shadow, &grade.midtone, &grade.highlight, &grade.global].into_iter().any(active);
-        ColourOps {
-            hsl: hsl_active.then(|| hsl.clone()),
-            vibrance,
-            saturation,
-            grade: grade_active.then(|| grade.clone()),
-        }
+        let grade = grade_active.then(|| grade.clone());
+        let grade_lut = grade.as_ref().map(|g| (0..=GRADE_LUT).map(|i| grade_delta(g, i as f32 / GRADE_LUT as f32)).collect());
+        ColourOps { hsl: hsl_active.then(|| hsl.clone()), vibrance, saturation, grade, grade_lut }
     }
 
     pub fn is_identity(&self) -> bool {
@@ -190,21 +184,38 @@ impl ColourOps {
             chroma *= (1.0 + self.saturation / 100.0).max(0.0);
         }
 
-        let h = hue.to_radians();
-        let (mut a, mut b) = (chroma * h.cos(), chroma * h.sin());
-        if let Some(g) = &self.grade {
-            for (wheel, weight) in grade_weights(g, y) {
-                if wheel.sat != 0.0 {
-                    let th = wheel.hue.to_radians();
-                    let k = weight * wheel.sat / 100.0 * 0.36;
-                    a += k * th.cos();
-                    b += k * th.sin();
-                }
-                y += weight * wheel.lum / 100.0 * 0.15 * midtones(y).max(0.3);
-            }
+        let (sin, cos) = hue.to_radians().sin_cos();
+        let (mut a, mut b) = (chroma * cos, chroma * sin);
+        if let (Some(g), Some(lut)) = (&self.grade, &self.grade_lut) {
+            let d = if (0.0..=1.0).contains(&y) {
+                let x = y * GRADE_LUT as f32;
+                let i = (x as usize).min(GRADE_LUT - 1);
+                let f = x - i as f32;
+                std::array::from_fn(|k| lut[i][k] + (lut[i + 1][k] - lut[i][k]) * f)
+            } else {
+                grade_delta(g, y)
+            };
+            a += d[0];
+            b += d[1];
+            y += d[2];
         }
         from_yab([y, a, b])
     }
+}
+
+/// What colour grading adds to (a, b) and to luma for a pixel of luma `y`.
+fn grade_delta(g: &ColorGrade, y: f32) -> [f32; 3] {
+    let (mut da, mut db, mut yy) = (0.0, 0.0, y);
+    for (wheel, weight) in grade_weights(g, y) {
+        if wheel.sat != 0.0 {
+            let (sin, cos) = wheel.hue.to_radians().sin_cos();
+            let k = weight * wheel.sat / 100.0 * 0.36;
+            da += k * cos;
+            db += k * sin;
+        }
+        yy += weight * wheel.lum / 100.0 * 0.15 * midtones(yy).max(0.3);
+    }
+    [da, db, yy - y]
 }
 
 /// The wheels with their weight at luma `y`: shadows, midtones and highlights

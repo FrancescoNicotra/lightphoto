@@ -33,6 +33,12 @@ Implemented in the [`pipeline`](../crates/pipeline) crate. Every Camera Raw pane
 
 \* *Melissa* = ProPhoto primaries with the sRGB transfer curve, the space of Lightroom's curves and RGB readouts.
 
+## Speed and memory
+
+- **Stage cache** (`pipeline::stages`): `Pipeline::render_cached` keeps four stages (working image, tone, spatial filters, colour), each with the settings it was computed from, and redoes only the stages whose settings changed. The photo is recognised by its pixel buffer, size, a sample of its pixels and its colour data, so a new photo or a swapped camera profile is never served from the cache. A cached render is bit-identical to an uncached one (tested).
+- **Transfer functions** in the per-pixel passes use tables instead of `powf` (`pipeline::gamma`, error below 2·10⁻⁵), and colour grading is tabulated on luma: the colour pass went from 55 to 26 ms at 2048 px.
+- **Memory**: the demosaic writes only the default crop, the decoder reads the RAW samples in place instead of converting them all to f32, colour noise reduction works one channel at a time, and exports use `Pipeline::render_owned` and an owning `export::finish`, which reuse the photo's pixels instead of copying them. Peak memory for a 16 MP export went from 1.05 GB to 0.53 GB (decode alone from 634 to 368 MB). Scaling linearly, a 45 MP file needs about 1.5 GB; not measured, as there is no such sample yet. Processing in strips would lower it further and is not done.
+
 ## Masks
 
 A mask is a group of components (linear gradient, radial gradient, brush) combined in order: add (maximum), subtract (× 1 − component), intersect (×). Each component can be inverted and has an opacity; the group has an Amount. The weights are computed at the resolution of the render (drafts while dragging, preview, export), so the same mask gives the same result at every size:

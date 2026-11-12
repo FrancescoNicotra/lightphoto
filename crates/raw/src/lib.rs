@@ -74,7 +74,7 @@ pub struct Photo {
     pub color: ColorSource,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ColorSource {
     /// `data` is camera RGB and needs the profile and a white balance.
     Camera(Box<CameraData>),
@@ -82,7 +82,7 @@ pub enum ColorSource {
     Working,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CameraData {
     pub profile: ColorProfile,
     /// Camera response to the as-shot white, max component 1.
@@ -163,16 +163,27 @@ impl Photo {
     /// Scene white maps to (1, 1, 1) when it is just at the clip point; pixels
     /// with a clipped channel are clipped to white so highlights stay neutral.
     pub fn to_working(&self, white: Option<Xy>) -> Image {
-        let ColorSource::Camera(cam) = &self.color else {
-            return self.data.clone();
-        };
+        let mut out = self.data.clone();
+        self.working_in_place(&mut out, white);
+        out
+    }
+
+    /// As [`Photo::to_working`], converting the photo's own pixels instead of
+    /// a copy, for when the photo is not needed afterwards (an export).
+    pub fn into_working(mut self, white: Option<Xy>) -> Image {
+        let mut data = std::mem::replace(&mut self.data, Image::new(0, 0));
+        self.working_in_place(&mut data, white);
+        data
+    }
+
+    fn working_in_place(&self, out: &mut Image, white: Option<Xy>) {
+        let ColorSource::Camera(cam) = &self.color else { return };
         let white = white.or(self.as_shot_white()).unwrap_or(color::D50);
         let neutral = cam.profile.xy_to_neutral(white);
         let gains = neutral.map(|n| (1.0 / n.max(1e-6)) as f32);
         let to_pcs = color::mul(&cam.profile.camera_to_xyz_d50(white), &color::diag(neutral));
         let m = color::to_f32(&color::mul(&color::xyz_to_prophoto(), &to_pcs));
 
-        let mut out = self.data.clone();
         out.map(|p| {
             let clipped = p.iter().any(|&c| c >= CLIP);
             let balanced: [f32; 3] = std::array::from_fn(|c| {
@@ -185,7 +196,6 @@ impl Photo {
             });
             color::apply(&m, balanced)
         });
-        out
     }
 }
 

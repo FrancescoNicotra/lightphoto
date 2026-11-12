@@ -16,9 +16,11 @@
 pub mod acr3;
 pub mod adobe;
 pub mod colour;
+pub mod gamma;
 pub mod geometry;
 pub mod local;
 pub mod masks;
+pub mod stages;
 pub mod tone;
 
 use rayon::prelude::*;
@@ -30,6 +32,8 @@ use raw::{ColorSource, Image, Photo};
 use xmp::{Curve, DevelopSettings, WhiteBalance};
 
 use colour::{ColourOps, ColourSpace, TableOp};
+pub use stages::{Recomputed, RenderCache};
+use stages::{ColourKey, PhotoId, SpatialKey, ToneKey, Toned, Working, WorkingKey};
 use tone::Lut1;
 
 /// Tone curve of Adobe's built-in "Adobe Color" profile, as Lightroom spells
@@ -248,6 +252,107 @@ impl Pipeline {
     /// Develops `photo`. The result is display-referred linear ProPhoto in
     /// 0..1, without grain (see [`Pipeline::grain`]).
     pub fn render(&self, photo: &Photo, opts: &RenderOptions) -> Image {
+        // Without a cache each stage hands its image to the next: one copy
+        // alive at a time, which matters at full size.
+        let white = self.white_point(photo);
+        let Working { img, canvas, px } = self.working(photo, opts, white);
+        let stage = self.profile_stage(photo, white);
+        let weights = self.mask_weights(canvas.0, canvas.1, photo.info.orientation, img.width, img.height);
+        self.process_inner(img, self.exposure(photo) + stage.exposure_offset, px, &stage, &weights)
+    }
+
+    /// As [`Pipeline::render`] for a photo that is not needed afterwards: its
+    /// pixels become the working image, saving a full-size copy. Not for
+    /// reduced renders (`max_size`), which make their own copy anyway.
+    pub fn render_owned(&self, photo: Photo, opts: &RenderOptions) -> Image {
+        if opts.max_size.is_some_and(|n| photo.data.width.max(photo.data.height) > n) {
+            return self.render(&photo, opts);
+        }
+        let white = self.white_point(&photo);
+        let stage = self.profile_stage(&photo, white);
+        let exposure = self.exposure(&photo) + stage.exposure_offset;
+        let full = opts.full_size.unwrap_or_else(|| {
+            photo.info.raw.as_ref().map_or(photo.data.width.max(photo.data.height), |r| r.crop[2].max(r.crop[3]))
+        });
+        let orientation = photo.info.orientation;
+        let img = photo.into_working(white);
+        let px = img.width.max(img.height) as f32 / full as f32;
+        let canvas = (img.width, img.height);
+        let img = geometry::apply(img, &self.settings.crop, orientation);
+        let weights = self.mask_weights(canvas.0, canvas.1, orientation, img.width, img.height);
+        self.process_inner(img, exposure, px, &stage, &weights)
+    }
+
+    /// As [`Pipeline::render`], reusing the stages of the previous render
+    /// kept in `cache` whose inputs have not changed.
+    pub fn render_cached(&self, photo: &Photo, opts: &RenderOptions, cache: &mut RenderCache) -> Image {
+        let s = &self.settings;
+        let white = self.white_point(photo);
+        let mut last = Recomputed::default();
+
+        let key = WorkingKey { photo: PhotoId::of(photo), max_size: opts.max_size, full_size: opts.full_size, white, crop: s.crop.clone() };
+        if cache.working.as_ref().is_none_or(|(k, _)| *k != key) {
+            let working = self.working(photo, opts, white);
+            cache.working = Some((key, working));
+            (cache.tone, cache.spatial, cache.colour) = (None, None, None);
+            last.working = true;
+        }
+        let working = &cache.working.as_ref().expect("just filled").1;
+
+        let stage = self.profile_stage(photo, white);
+        let key = ToneKey {
+            exposure: self.exposure(photo) + stage.exposure_offset,
+            calibration: s.calibration.clone(),
+            incremental: (s.incremental_temperature, s.incremental_tint),
+            look: s.look.clone(),
+            rgb_table: s.rgb_table.clone(),
+            basic: s.basic.clone(),
+            parametric: s.parametric.clone(),
+            curves: s.curves.clone(),
+            masks: s.masks.clone(),
+        };
+        if cache.tone.as_ref().is_none_or(|(k, _)| *k != key) {
+            let (w, h) = working.canvas;
+            let weights = self.mask_weights(w, h, photo.info.orientation, working.img.width, working.img.height);
+            let img = self.tone_stage(working.img.clone(), key.exposure, &stage, &weights);
+            cache.tone = Some((key, Toned { img, weights }));
+            (cache.spatial, cache.colour) = (None, None);
+            last.tone = true;
+        }
+        let toned = &cache.tone.as_ref().expect("just filled").1;
+
+        let (p, e) = (&s.presence, &s.effects);
+        let key = SpatialKey {
+            detail: s.detail.clone(),
+            local: [p.texture, p.clarity, p.dehaze],
+            vignette: [e.vignette_amount, e.vignette_midpoint, e.vignette_roundness, e.vignette_feather],
+        };
+        if cache.spatial.as_ref().is_none_or(|(k, _)| *k != key) {
+            let img = self.spatial_stage(toned.img.clone(), working.px, &toned.weights);
+            cache.spatial = Some((key, img));
+            cache.colour = None;
+            last.spatial = true;
+        }
+        let spatial = &cache.spatial.as_ref().expect("just filled").1;
+
+        let key = ColourKey {
+            hsl: s.hsl.clone(),
+            vibrance: s.presence.vibrance,
+            saturation: s.presence.saturation,
+            color_grade: s.color_grade.clone(),
+            cube: self.cube.clone(),
+        };
+        if cache.colour.as_ref().is_none_or(|(k, _)| *k != key) {
+            let img = self.colour_stage(spatial.clone());
+            cache.colour = Some((key, img));
+            last.colour = true;
+        }
+        cache.last = last;
+        cache.colour.as_ref().expect("just filled").1.clone()
+    }
+
+    /// Reduced to the render size, white balanced, cropped.
+    fn working(&self, photo: &Photo, opts: &RenderOptions, white: Option<Xy>) -> Working {
         let small;
         let src = match opts.max_size {
             Some(n) if photo.data.width.max(photo.data.height) > n => {
@@ -256,7 +361,6 @@ impl Pipeline {
             }
             _ => photo,
         };
-        let white = self.white_point(photo);
         let img = src.to_working(white);
         // Pixel radii are given for the full-size image.
         let full = opts.full_size.unwrap_or_else(|| {
@@ -265,11 +369,9 @@ impl Pipeline {
         let px = img.width.max(img.height) as f32 / full as f32;
         // Cropping first: the post-crop vignette and the other spatial
         // operations then see the final frame.
-        let (canvas_w, canvas_h) = (img.width, img.height);
+        let canvas = (img.width, img.height);
         let img = geometry::apply(img, &self.settings.crop, photo.info.orientation);
-        let stage = self.profile_stage(photo, white);
-        let weights = self.mask_weights(canvas_w, canvas_h, photo.info.orientation, img.width, img.height);
-        self.process_inner(img, self.exposure(photo) + stage.exposure_offset, px, &stage, &weights)
+        Working { img, canvas, px }
     }
 
     /// Weight maps of the local corrections that change something, for a
@@ -304,7 +406,14 @@ impl Pipeline {
     }
 
     /// `weights` holds one map per entry of `self.locals` (or none at all).
-    fn process_inner(&self, mut img: Image, exposure: f32, px: f32, stage: &ProfileStage, weights: &[Vec<f32>]) -> Image {
+    fn process_inner(&self, img: Image, exposure: f32, px: f32, stage: &ProfileStage, weights: &[Vec<f32>]) -> Image {
+        let img = self.tone_stage(img, exposure, stage, weights);
+        let img = self.spatial_stage(img, px, weights);
+        self.colour_stage(img)
+    }
+
+    /// Linear → Melissa: profile, tone and the point-wise part of the masks.
+    fn tone_stage(&self, mut img: Image, exposure: f32, stage: &ProfileStage, weights: &[Vec<f32>]) -> Image {
         let gain = 2f32.powf(exposure);
         img.pixels.par_iter_mut().for_each(|p| *p = self.pass_a(*p, gain, stage));
         let locals: Vec<(&masks::LocalOp, &Vec<f32>)> = self.locals.iter().zip(weights).collect();
@@ -317,7 +426,11 @@ impl Pipeline {
                 }
             });
         }
+        img
+    }
 
+    /// Filters that look at neighbouring pixels, on Melissa values.
+    fn spatial_stage(&self, mut img: Image, px: f32, weights: &[Vec<f32>]) -> Image {
         let s = &self.settings;
         local::color_nr(&mut img, s.detail.color_nr, px);
         if s.presence.texture != 0.0 || s.presence.clarity != 0.0 {
@@ -328,12 +441,16 @@ impl Pipeline {
         }
         let d = &s.detail;
         local::sharpen(&mut img, d.sharpness, d.sharpen_radius, d.sharpen_detail, d.sharpen_edge_masking, px);
-        for (op, w) in &locals {
+        for (op, w) in self.locals.iter().zip(weights) {
             op.spatial(&mut img, w, px);
         }
         let e = &s.effects;
         local::vignette(&mut img, e.vignette_amount, e.vignette_midpoint, e.vignette_roundness, e.vignette_feather);
+        img
+    }
 
+    /// Melissa → colour controls → display linear ProPhoto.
+    fn colour_stage(&self, mut img: Image) -> Image {
         img.pixels.par_iter_mut().for_each(|p| *p = self.pass_b(*p));
         img
     }
@@ -363,15 +480,15 @@ impl Pipeline {
             p = map.apply(p);
         }
         let mut e = match self.kind {
-            SourceKind::Raw => tone::rgb_tone(p, stage.tone_curve.as_ref().unwrap_or(&self.acr3)).map(color::srgb_oetf),
-            SourceKind::Rendered => p.map(color::srgb_oetf),
+            SourceKind::Raw => tone::rgb_tone(p, stage.tone_curve.as_ref().unwrap_or(&self.acr3)).map(gamma::oetf),
+            SourceKind::Rendered => p.map(gamma::oetf),
         };
         e = e.map(|v| self.look_curve.get(v));
         if let Some(t) = &self.profile_table {
-            e = t.apply(e.map(color::srgb_eotf)).map(|v| color::srgb_oetf(v.clamp(0.0, 1.0)));
+            e = t.apply(e.map(gamma::eotf)).map(|v| gamma::oetf(v.clamp(0.0, 1.0)));
         }
         if let Some(t) = &self.preset_table {
-            e = t.apply(e.map(color::srgb_eotf)).map(|v| color::srgb_oetf(v.clamp(0.0, 1.0)));
+            e = t.apply(e.map(gamma::eotf)).map(|v| gamma::oetf(v.clamp(0.0, 1.0)));
         }
         e = std::array::from_fn(|c| self.channels[c].get(self.tone.get(e[c])));
         let tint = self.settings.calibration.shadow_tint;
@@ -385,7 +502,7 @@ impl Pipeline {
 
     /// Melissa → colour controls → display linear ProPhoto.
     fn pass_b(&self, e: [f32; 3]) -> [f32; 3] {
-        let mut lin = e.map(|v| color::srgb_eotf(v.clamp(0.0, 1.0)));
+        let mut lin = e.map(|v| gamma::eotf(v.clamp(0.0, 1.0)));
         if !self.colour.is_identity() {
             lin = self.space.decode(self.colour.apply(self.space.encode(lin)));
         }
@@ -406,9 +523,9 @@ impl Pipeline {
         if e.grain_amount <= 0.0 {
             return;
         }
-        img.map(|p| p.map(color::srgb_oetf));
+        img.map(|p| p.map(gamma::oetf));
         local::grain(img, e.grain_amount, e.grain_size, e.grain_frequency, 0);
-        img.map(|p| p.map(|v| color::srgb_eotf(v.clamp(0.0, 1.0))));
+        img.map(|p| p.map(|v| gamma::eotf(v.clamp(0.0, 1.0))));
     }
 
     /// The point-wise part of the settings as a 3D LUT on sRGB-encoded

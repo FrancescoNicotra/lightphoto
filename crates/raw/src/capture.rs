@@ -160,7 +160,14 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
     // The DNG BlackLevel pattern is anchored at the active area origin.
     let origin = raw.active_area.map_or((0, 0), |r| (r.p.x, r.p.y));
 
-    let samples = raw.data.as_f32();
+    // Read the decoded samples in place: converting them all to f32 first
+    // would cost another copy of the sensor.
+    let sample = |i: usize| -> f32 {
+        match &raw.data {
+            RawImageData::Integer(v) => v[i] as f32,
+            RawImageData::Float(v) => v[i],
+        }
+    };
     let black = raw.blacklevel.as_vec();
     let (bw, bh) = (raw.blacklevel.width.max(1), raw.blacklevel.height.max(1));
     let cpp = raw.cpp;
@@ -174,7 +181,7 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
         let by = (y + bh - origin.1 % bh) % bh;
         let b = black.get((by * bw + bx) * cpp + c).or(black.first()).copied().unwrap_or(0.0);
         let wl = white.get(c).or(white.first()).copied().unwrap_or(65535.0);
-        (samples[(y * w + x) * cpp + c] - b) / (wl - b).max(min_range)
+        (sample((y * w + x) * cpp + c) - b) / (wl - b).max(min_range)
     };
     let sensor = |image: Image, clipped: Vec<u8>, cfa: String| Sensor { image, clipped, crop, cfa, white_level: white.clone(), float };
 
@@ -205,7 +212,7 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
                     return Ok(sensor(img, clipped, cfa.name()));
                 }
             }
-            let img = demosaic::bilinear(&mosaic, w, h, &cfa).crop(cx, cy, cw, ch);
+            let img = demosaic::bilinear_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch]);
             let clipped = if with_mask {
                 let r = demosaic::support_radius(&cfa);
                 dilated_mask(&mosaic, w, h, Grid { origin: [cx, cy], size: (img.width, img.height), step: 1, before: r, after: r })

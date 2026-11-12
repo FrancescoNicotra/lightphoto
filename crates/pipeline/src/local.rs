@@ -120,23 +120,23 @@ pub fn sharpen(img: &mut Image, amount: f32, radius: f32, detail: f32, masking: 
     img.pixels.par_iter_mut().zip(&deltas).for_each(|(p, d)| *p = p.map(|c| c + d));
 }
 
-/// Colour noise reduction (0..100): blurs chroma, keeps luma.
+/// Colour noise reduction (0..100): blurs chroma, keeps luma. One channel
+/// at a time, so only a few planes are alive at once.
 pub fn color_nr(img: &mut Image, amount: f32, px: f32) {
     let sigma = amount / 100.0 * 6.0 * px;
     if sigma < 0.5 {
         return;
     }
     let (w, h) = (img.width, img.height);
+    // Luma is taken once, before any channel changes; each channel then
+    // only reads itself, so it can be replaced in place.
     let y = plane(img, luma);
-    let chroma: Vec<Vec<f32>> = (0..3)
-        .map(|c| {
-            let ch: Vec<f32> = img.pixels.par_iter().zip(&y).map(|(p, y)| p[c] - y).collect();
-            blur(&ch, w, h, sigma)
-        })
-        .collect();
-    img.pixels.par_iter_mut().enumerate().for_each(|(i, p)| {
-        *p = std::array::from_fn(|c| y[i] + chroma[c][i]);
-    });
+    for c in 0..3 {
+        let ch: Vec<f32> = img.pixels.par_iter().zip(&y).map(|(p, y)| p[c] - y).collect();
+        let blurred = blur(&ch, w, h, sigma);
+        drop(ch);
+        img.pixels.par_iter_mut().zip(&blurred).zip(&y).for_each(|((p, b), y)| p[c] = y + b);
+    }
 }
 
 /// Post-crop vignette. `amount` −100..100 (negative darkens), `midpoint`,

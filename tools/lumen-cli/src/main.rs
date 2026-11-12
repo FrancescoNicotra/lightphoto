@@ -325,7 +325,8 @@ fn develop(args: &Args) -> CliResult<()> {
         let (cw, ch) = pipeline::geometry::cropped_size(photo.data.width, photo.data.height, &settings.crop, photo.info.orientation);
         let (w, h) = args.size.dimensions(cw, ch);
         let max_size = args.fast.then_some(w.max(h));
-        let rendered = pipeline.render(&photo, &RenderOptions { max_size, ..Default::default() });
+        let info = photo.info.clone();
+        let rendered = pipeline.render_owned(photo, &RenderOptions { max_size, ..Default::default() });
         let t_render = t.elapsed() - t_decode;
 
         let path = if to_dir {
@@ -337,8 +338,8 @@ fn develop(args: &Args) -> CliResult<()> {
         let format = Format::from_path(&path, args.quality)
             .ok_or_else(|| format!("unsupported output format {:?} (use .jpg, .png or .tif)", path.display()))?;
         let opts = ExportOptions { size: args.size, format, sharpen: args.sharpen };
-        let finished = export::finish(&rendered, &pipeline, &opts);
-        export::save(&finished, &photo.info, format, &path)?;
+        let finished = export::finish(rendered, &pipeline, &opts);
+        export::save(&finished, &info, format, &path)?;
 
         if input == &args.inputs[0] {
             for p in prepared.camera_profile.iter().chain(&prepared.look) {

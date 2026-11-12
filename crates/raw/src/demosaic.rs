@@ -108,11 +108,22 @@ pub fn support_radius(cfa: &Cfa) -> usize {
 
 /// Bilinear demosaic of a `width`×`height` mosaic.
 pub fn bilinear(mosaic: &[f32], width: usize, height: usize, cfa: &Cfa) -> Image {
+    bilinear_region(mosaic, width, height, cfa, [0, 0, width, height])
+}
+
+/// Bilinear demosaic of the region `[x, y, w, h]` only, reading neighbours
+/// from the whole mosaic: the same pixels as `bilinear(..).crop(..)` without
+/// demosaicing the masked borders and copying the result.
+pub fn bilinear_region(mosaic: &[f32], width: usize, height: usize, cfa: &Cfa, region: [usize; 4]) -> Image {
     assert_eq!(mosaic.len(), width * height);
+    let [x0, y0] = [region[0].min(width), region[1].min(height)];
+    let (rw, rh) = (region[2].min(width - x0), region[3].min(height - y0));
     let taps = neighbourhoods(cfa);
-    let mut img = Image::new(width, height);
-    img.pixels.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
-        for (x, out) in row.iter_mut().enumerate() {
+    let mut img = Image::new(rw, rh);
+    img.pixels.par_chunks_mut(rw.max(1)).enumerate().for_each(|(ry, row)| {
+        let y = y0 + ry;
+        for (rx, out) in row.iter_mut().enumerate() {
+            let x = x0 + rx;
             let t = &taps[(y % cfa.height) * cfa.width + x % cfa.width];
             for c in 0..3 {
                 let (mut sum, mut n) = (0.0f32, 0u32);
@@ -228,6 +239,18 @@ mod tests {
         // R and B once per 4×4: some 3×3 windows miss one of them.
         let sparse = Cfa { width: 4, height: 4, colors: "RGGGGGGGGGBGGGGG".chars().map(|c| "RGB".find(c).unwrap() as u8).collect() };
         assert_eq!(support_radius(&sparse), 2);
+    }
+
+    #[test]
+    fn region_matches_crop_of_full() {
+        let cfa = Cfa::bayer("GRBG").unwrap();
+        let (w, h) = (23, 17);
+        let m: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 101) as f32 / 101.0).collect();
+        let full = bilinear(&m, w, h, &cfa);
+        for region in [[0, 0, w, h], [3, 2, 15, 11], [1, 0, 22, 17], [20, 15, 9, 9]] {
+            let r = bilinear_region(&m, w, h, &cfa, region);
+            assert_eq!(r, full.crop(region[0], region[1], region[2], region[3]), "{region:?}");
+        }
     }
 
     #[test]

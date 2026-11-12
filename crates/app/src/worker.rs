@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use eframe::egui;
 use pipeline::adobe::{self, AdobeProfiles};
-use pipeline::{Pipeline, RenderOptions, SourceKind};
+use pipeline::{RenderCache, Pipeline, RenderOptions, SourceKind};
 use raw::{ColorSource, DecodeOptions, Image, Photo, PhotoInfo, TempTint};
 use xmp::{Basic, DevelopSettings, Look};
 
@@ -133,7 +133,14 @@ impl Worker {
         let thread = std::thread::Builder::new()
             .name("render".into())
             .spawn(move || {
-                let mut state = WorkerState { adobe, tx, ctx, photo: None };
+                let mut state = WorkerState {
+                    adobe,
+                    tx,
+                    ctx,
+                    photo: None,
+                    draft_cache: RenderCache::new(),
+                    preview_cache: RenderCache::new(),
+                };
                 state.run(&mb);
             })
             .expect("spawn render thread");
@@ -200,6 +207,12 @@ struct WorkerState {
     tx: Sender<Event>,
     ctx: egui::Context,
     photo: Option<OpenPhoto>,
+    /// Intermediate stages of the last draft and preview renders, so a
+    /// slider only redoes the stages it affects. Full-size and thumbnail
+    /// renders are not cached: they would hold hundreds of MB, or change
+    /// settings every time.
+    draft_cache: RenderCache,
+    preview_cache: RenderCache,
 }
 
 /// The photo being edited, as the worker keeps it.
@@ -292,6 +305,9 @@ impl WorkerState {
 
     fn load(&mut self, path: PathBuf, generation: u64) {
         self.photo = None;
+        // The caches would be missed anyway; free their memory now.
+        self.draft_cache.clear();
+        self.preview_cache.clear();
         let t = Instant::now();
         let photo = match Photo::load(&path, &DecodeOptions { half_size: true }) {
             Ok(p) => p,
@@ -451,7 +467,12 @@ impl WorkerState {
             Quality::Thumb => Some(THUMB_SIZE),
             _ => None,
         };
-        let mut img = pipeline.render(photo, &RenderOptions { max_size, full_size: Some(open.full_size) });
+        let opts = RenderOptions { max_size, full_size: Some(open.full_size) };
+        let mut img = match quality {
+            Quality::Draft => pipeline.render_cached(photo, &opts, &mut self.draft_cache),
+            Quality::Preview => pipeline.render_cached(photo, &opts, &mut self.preview_cache),
+            Quality::Thumb | Quality::Full => pipeline.render(photo, &opts),
+        };
         pipeline.grain(&mut img);
         if let Some(w) = job.overlay.and_then(|i| pipeline.mask_overlay(photo, i, img.width, img.height)) {
             // Red at half strength where the mask is.

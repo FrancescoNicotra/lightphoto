@@ -87,10 +87,10 @@ pub struct ExportOptions {
 
 /// Resizes a rendered image (display linear ProPhoto, see
 /// [`Pipeline::render`]), adds grain and sharpening, and returns it ready
-/// to encode.
-pub fn finish(rendered: &Image, pipeline: &Pipeline, opts: &ExportOptions) -> Image {
+/// to encode. Takes the image: at the original size it is not copied.
+pub fn finish(rendered: Image, pipeline: &Pipeline, opts: &ExportOptions) -> Image {
     let (w, h) = opts.size.dimensions(rendered.width, rendered.height);
-    let mut img = resize::resize(rendered, w, h);
+    let mut img = resize::resize_owned(rendered, w, h);
     img.map(|p| p.map(|v| v.clamp(0.0, 1.0)));
     if opts.sharpen > 0.0 {
         img.map(|p| p.map(raw::color::srgb_oetf));
