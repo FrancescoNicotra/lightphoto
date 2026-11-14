@@ -119,7 +119,7 @@ pub fn thumbnail(path: &Path) -> Option<egui::ColorImage> {
 }
 
 fn developed_thumbnail(path: &Path) -> Option<egui::ColorImage> {
-    let photo = Photo::load(path, &DecodeOptions { half_size: true }).ok()?;
+    let photo = Photo::load(path, &DecodeOptions { half_size: true, ..Default::default() }).ok()?;
     let pipeline = Pipeline::new(&xmp::DevelopSettings::default(), SourceKind::of(&photo));
     let img = pipeline.render(&photo, &RenderOptions { max_size: Some(THUMB_SIZE as usize), ..Default::default() });
     Some(crate::worker::to_color_image(&img).0)

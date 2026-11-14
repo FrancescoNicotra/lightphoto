@@ -20,6 +20,7 @@ pub mod dng_write;
 pub mod highlights;
 pub mod hue_sat;
 pub mod image;
+pub mod lens;
 pub mod profile;
 pub mod rcd;
 
@@ -64,6 +65,10 @@ pub struct DecodeOptions {
     /// Bin 2×2 Bayer cells instead of demosaicing: half the resolution, much
     /// faster. Meant for previews.
     pub half_size: bool,
+    /// Leave out the lens corrections stored in the file (distortion,
+    /// vignetting, see [`lens`]), which are applied by default as Lightroom
+    /// does for built-in profiles.
+    pub no_lens_correction: bool,
 }
 
 /// A decoded photo, cropped and oriented for display.
@@ -126,6 +131,9 @@ pub struct RawInfo {
     pub white_level: Vec<f32>,
     pub as_shot_neutral: color::Vec3,
     pub as_shot_white: Xy,
+    /// The lens corrections applied to the data, in sensor coordinates
+    /// (empty when the file has none or they were turned off).
+    pub lens_correction: Vec<lens::Opcode>,
 }
 
 /// Raw channel value above which a sample of merged HDR data is treated as

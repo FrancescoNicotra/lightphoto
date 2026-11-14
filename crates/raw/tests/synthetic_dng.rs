@@ -56,7 +56,7 @@ fn develops_synthetic_dng() {
 #[test]
 fn half_size_matches_full_size() {
     let (path, neutral) = write_dng("synthetic-half.dng", SIZE);
-    let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let photo = Photo::load(&path, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     assert_eq!((photo.data.width, photo.data.height), (20, 28));
     let img = photo.to_working(None);
     assert_rgb(img.get(10, 3), GREY as f32, 2e-3, "grey card");
@@ -82,7 +82,7 @@ fn timing_at_16_megapixels() {
     let (path, _) = write_dng("synthetic-16mp.dng", (4592, 3448));
     for half_size in [false, true] {
         let t = Instant::now();
-        let photo = Photo::load(&path, &DecodeOptions { half_size }).unwrap();
+        let photo = Photo::load(&path, &DecodeOptions { half_size, ..Default::default() }).unwrap();
         let decoded = t.elapsed();
         let img = photo.to_working(None);
         let developed = t.elapsed();

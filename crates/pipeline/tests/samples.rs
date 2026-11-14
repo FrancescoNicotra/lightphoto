@@ -30,7 +30,7 @@ fn stats(img: &Image) -> (f64, f64, f64) {
 fn dreamy_preset_is_brighter_and_warmer() {
     let sample = test_samples::gx80();
     let preset = Preset::load(require(PRESET)).unwrap();
-    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true }).unwrap();
+    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     let opts = RenderOptions { max_size: Some(800), ..Default::default() };
 
     let plain = Pipeline::new(&DevelopSettings::default(), SourceKind::Raw).render(&photo, &opts);
@@ -57,7 +57,7 @@ fn dreamy_preset_is_brighter_and_warmer() {
 fn preview_and_full_size_agree() {
     let sample = test_samples::gx80();
     let preset = Preset::load(require(PRESET)).unwrap();
-    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true }).unwrap();
+    let photo = Photo::load(&sample.raw, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     let p = Pipeline::new(&preset.settings, SourceKind::Raw);
     let small = p.render(&photo, &RenderOptions { max_size: Some(400), ..Default::default() });
     let full = p.render(&photo, &RenderOptions::default()).downscale(400);

@@ -49,6 +49,8 @@ pub(crate) struct DngTags {
     as_shot_white_xy: Option<Xy>,
     pub(crate) baseline_exposure: Option<f64>,
     pub(crate) unique_camera_model: Option<String>,
+    /// OpcodeList3 (lens corrections after demosaicing), raw bytes.
+    pub(crate) opcode_list3: Option<Vec<u8>>,
 }
 
 impl DngTags {
@@ -76,6 +78,10 @@ impl DngTags {
             as_shot_white_xy: floats(DngTag::AsShotWhiteXY).filter(|v| v.len() == 2).map(|v| Xy::new(v[0], v[1])),
             baseline_exposure: floats(DngTag::BaselineExposure).and_then(|v| v.first().copied()),
             unique_camera_model: root.get_entry(DngTag::UniqueCameraModel).and_then(|e| e.as_string()).map(|s| s.trim_end_matches('\0').to_string()),
+            opcode_list3: ifds.iter().rev().find_map(|ifd| ifd.get_entry(DngTag::OpcodeList3)).and_then(|e| match &e.value {
+                rawler::formats::tiff::Value::Undefined(v) | rawler::formats::tiff::Value::Byte(v) => Some(v.clone()),
+                _ => None,
+            }),
         })
     }
 }

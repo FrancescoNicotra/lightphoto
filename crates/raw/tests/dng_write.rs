@@ -215,7 +215,7 @@ fn single_frame_merge_develops_like_the_original() {
             assert_eq!(capture.clipped[y * cw + x], u8::from(x >= first), "({x}, {y})");
         }
     }
-    let half = load_capture(&source, &DecodeOptions { half_size: true }).unwrap();
+    let half = load_capture(&source, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     assert_eq!((half.data.width, half.data.height), (cw / 2, ch / 2));
     for (i, &m) in half.clipped.iter().enumerate() {
         assert_eq!(m, u8::from(i % (cw / 2) >= 15), "half-size pixel {i}");

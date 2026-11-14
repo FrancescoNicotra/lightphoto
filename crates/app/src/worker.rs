@@ -309,7 +309,7 @@ impl WorkerState {
         self.draft_cache.clear();
         self.preview_cache.clear();
         let t = Instant::now();
-        let photo = match Photo::load(&path, &DecodeOptions { half_size: true }) {
+        let photo = match Photo::load(&path, &DecodeOptions { half_size: true, ..Default::default() }) {
             Ok(p) => p,
             Err(e) => {
                 self.send(Event::Failed { generation, error: e.to_string() });

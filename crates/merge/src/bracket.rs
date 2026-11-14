@@ -39,7 +39,7 @@ impl Source {
 
     pub(crate) fn load(&self, half: bool) -> Result<Capture, MergeError> {
         match self {
-            Source::File(path) => raw::load_capture(path, &DecodeOptions { half_size: half }).map_err(|e| match e {
+            Source::File(path) => raw::load_capture(path, &DecodeOptions { half_size: half, ..Default::default() }).map_err(|e| match e {
                 raw::Error::Unsupported(_) if raw::is_rendered_image(path) => MergeError::NotRaw(vec![self.name()]),
                 e => MergeError::Decode { frame: self.name(), message: e.to_string() },
             }),

@@ -14,7 +14,7 @@ const DNG: &str = "Dreamy days in spring - mobile version.dng";
 #[test]
 fn decodes_the_gx80_dng() {
     let Some(path) = optional(DNG) else { return };
-    let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let photo = Photo::load(&path, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     assert_eq!(photo.info.make, "Panasonic");
     assert!(photo.info.model.contains("GX80"), "{}", photo.info.model);
     let raw = photo.info.raw.as_ref().unwrap();
@@ -35,7 +35,7 @@ fn as_shot_white_balance_matches_lightroom() {
         return;
     };
 
-    let photo = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let photo = Photo::load(&path, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     let ours = TempTint::from_xy(photo.as_shot_white().unwrap());
     assert!(
         (ours.temperature - temperature).abs() < temperature * 0.02 && (ours.tint - tint).abs() < 3.0,
@@ -75,7 +75,7 @@ fn decodes_the_gx80_raw() {
     assert!((4000.0..6000.0).contains(&tt.temperature), "{tt:?}"); // sunny day
 
     // Full and half size agree.
-    let half = Photo::load(&path, &DecodeOptions { half_size: true }).unwrap();
+    let half = Photo::load(&path, &DecodeOptions { half_size: true, ..Default::default() }).unwrap();
     assert_eq!((half.data.width, half.data.height), half_size);
     let to_srgb = raw::color::to_f32(&raw::color::prophoto_to_srgb());
     let srgb = |p: &Photo| {

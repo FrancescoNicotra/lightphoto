@@ -54,6 +54,17 @@ Before the demosaic, photosites at or above 0.98 of the white level are estimate
 
 Measured (`crates/raw/tests/highlights_quality.rs`), by overexposing the camera JPEG and clipping it as a sensor would: mean error on the clipped samples 0.24 EV instead of 0.39 at +1 EV, 0.33 instead of 0.55 at +2 EV (darktable's global offset: 0.26 and 0.42). What is left is mostly foliage texture, where the pixels that clipped are those greener than their neighbours. On the GX80 RW2's sky, 1–4% of the partly clipped pixels lean magenta, against 70% of the raw values. Cost: about 20–25 ms per decode at 16 MP.
 
+## Lens corrections
+
+Corrections stored in the file are applied at decoding, after the demosaic and before orientation, as Lightroom does for built-in lens profiles ([`crates/raw/src/lens.rs`](../crates/raw/src/lens.rs)); `DecodeOptions::no_lens_correction` leaves them out, and `RawInfo::lens_correction` lists what was applied.
+
+- Everything is expressed with the two DNG opcodes for it, from the DNG SDK's definitions: **WarpRectilinear** (each output pixel read from `centre + R·(n·(k₀ + k₁r² + k₂r⁴ + k₃r⁶) + tangential)`, `R` the distance from the optical centre to the farthest corner, one set of coefficients per colour plane, which also corrects lateral chromatic aberration) and **FixVignetteRadial** (a gain `1 + k₀r² + … + k₄r¹⁰`). Resampling is Catmull-Rom.
+- **DNG**: OpcodeList3, as written by Adobe's DNG Converter and by phones, with the active area as the image the opcodes refer to. Other opcodes (GainMap in OpcodeList2, for instance) are ignored.
+- **Panasonic RW2** (and Leica files of the same kind): the distortion polynomial in the maker notes (tag 0x0119; layout as decoded by darktable), with radii in units of the half diagonal of the image: a source radius `rd` lands at `rd·(1 + s·(a·rd² + b·rd⁴ + c·rd⁶))`. It is inverted (Newton) and fitted with the WarpRectilinear cubic in r² by least squares: worst error 0.05 px at 16 MP.
+- Checked against the camera, which applies the same correction to its JPEG (`crates/raw/tests/lens_framing.rs`): matching 108 patches of our develop to the GX80's JPEG and fitting a scale and shift, the residual is 0.40 px rms (1.3 px worst) at 1920 px, against 6.4 px rms (28 px worst) uncorrected, at scale 0.9995: the same framing. The versioned crop in `samples/ci` carries the correction as an OpcodeList3, moved onto the crop, so this runs in CI too.
+- Cost: 60–90 ms per 16 MP decode, 20–30 ms at half size.
+- Not for HDR merge inputs: the merged DNG does not carry the correction yet.
+
 ## Speed and memory
 
 - **Stage cache** (`pipeline::stages`): `Pipeline::render_cached` keeps four stages (working image, tone, spatial filters, colour), each with the settings it was computed from, and redoes only the stages whose settings changed. The photo is recognised by its pixel buffer, size, a sample of its pixels and its colour data, so a new photo or a swapped camera profile is never served from the cache. A cached render is bit-identical to an uncached one (tested).
@@ -86,7 +97,7 @@ Folders searched: those in `LUMEN_ADOBE_DIR`; on macOS the Lightroom and Lightro
 - **Without an Adobe install** the Adobe Color LookTable is not available: only its curve is applied, and the CLI says so.
 - **Highlights/Shadows, Texture, Clarity, Dehaze** are global or simple. In Adobe they are local, edge-aware filters (a guided filter would get closer).
 - **Luminance noise reduction** is not implemented (the CLI says so).
-- **Lens correction**: absent. The GX80's own JPEG, for instance, corrects distortion and so has a tighter framing.
+- **Lens correction**: only what the file carries (see [Lens corrections](#lens-corrections)); no lens database (lensfun), no correction of lateral chromatic aberration or vignetting for Panasonic RW2s (not in their metadata), no Optics panel in the app.
 - **Input ICC profiles** (JPEG/TIFF): sRGB is assumed.
 
 ## `.cube` export

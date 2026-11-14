@@ -88,7 +88,7 @@ fn reconstruction_recovers_most_of_the_clipped_light() {
 fn a_blown_sky_does_not_turn_magenta() {
     let path = test_samples::gx80().raw;
     for half_size in [false, true] {
-        let photo = Photo::load(&path, &DecodeOptions { half_size }).unwrap();
+        let photo = Photo::load(&path, &DecodeOptions { half_size, ..Default::default() }).unwrap();
         let raw::ColorSource::Camera(cam) = &photo.color else { panic!("raw expected") };
         let gains = cam.as_shot_neutral.map(|n| 1.0 / n as f32);
         let (mut partly, mut magenta, mut above) = (0usize, 0usize, 0usize);
