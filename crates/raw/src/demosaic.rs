@@ -1,6 +1,7 @@
-//! Demosaicing of colour filter array data. Bilinear for the MVP: it works for
-//! any repeating RGB pattern (Bayer and X-Trans alike), and since it never
-//! mixes channels, white balance can be applied before or after it.
+//! Demosaicing of colour filter array data. Full-size Bayer decodes use RCD
+//! (`crate::rcd`); the bilinear method here covers every other pattern
+//! (X-Trans) and the image borders RCD cannot reach, and the half-size
+//! "superpixel" binning serves previews.
 
 use rayon::prelude::*;
 

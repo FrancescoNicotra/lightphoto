@@ -9,7 +9,9 @@
 //! - `P1010041-crop.dng`: a crop of the GX80 RW2 (raw.pixls.us, CC0) as a
 //!   Bayer DNG. The photosites are copied unchanged (Lossless JPEG, the same
 //!   black and white levels, matrices, white balance and EXIF), only fewer
-//!   of them; the embedded preview is the same crop of the camera JPEG.
+//!   of them; the embedded preview is the same crop of the camera JPEG. The
+//!   lens correction of the RW2's maker notes becomes an OpcodeList3
+//!   WarpRectilinear for the crop.
 //! - `P1010041-camera-crop.jpg`: the same region of the camera JPEG, at its
 //!   own scale (1920 px wide for the whole frame).
 //! - `P1010041-camera-lightroom-dreamy-crop.jpg`: the same region of
@@ -29,7 +31,7 @@ use rawler::decoders::RawDecodeParams;
 use rawler::dng::writer::DngWriter;
 use rawler::dng::{CropMode, DngCompression, DngPhotometricConversion, DNG_VERSION_V1_4};
 use rawler::rawsource::RawSource;
-use rawler::tags::{ExifTag, TiffCommonTag};
+use rawler::tags::{DngTag, ExifTag, TiffCommonTag};
 use rawler::RawImageData;
 
 /// Sensor crop of the RW2, in photosites: x, y, width, height. Even origin so
@@ -98,10 +100,25 @@ fn crop_raw(rw2: &Path, camera_jpeg: &Path, out: &Path) -> Result<(), Box<dyn st
 
     let preview = crop(&image::open(camera_jpeg)?, PREVIEW_CROP);
 
+    // The lens correction in the RW2's maker notes (dropped below), as the
+    // OpcodeList3 Adobe's DNG Converter would write, moved onto the crop.
+    let photo = raw::Photo::load(rw2, &raw::DecodeOptions::default())?;
+    let lens = photo.info.raw.as_ref().map(|r| r.lens_correction.clone()).unwrap_or_default();
+    assert!(!lens.is_empty(), "the RW2 should carry its lens correction");
+    let lens: Vec<raw::lens::Opcode> = lens
+        .into_iter()
+        .map(|op| match op {
+            raw::lens::Opcode::Warp(w) => raw::lens::Opcode::Warp(w.shifted([x0 as f64, y0 as f64])),
+            other => other,
+        })
+        .collect();
+    let opcodes = raw::lens::opcode_list(&lens, [0, 0, w, h]);
+
     let mut file = BufWriter::new(File::create(out)?);
     let mut dng = DngWriter::new(&mut file, DNG_VERSION_V1_4)?;
     let mut sub = dng.subframe(0);
     sub.raw_image(&raw, CropMode::Best, DngCompression::Lossless, DngPhotometricConversion::Original, 1)?;
+    sub.ifd_mut().add_tag_undefined(DngTag::OpcodeList3, opcodes);
     sub.finalize()?;
     let mut sub = dng.subframe(1);
     sub.preview(&preview, 0.9)?;

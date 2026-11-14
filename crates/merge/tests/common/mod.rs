@@ -43,6 +43,7 @@ fn info(spec: &ShotSpec, w: usize, h: usize) -> PhotoInfo {
             white_level: vec![1.0],
             as_shot_neutral: NEUTRAL,
             as_shot_white: ColorProfile::from_color_matrix(COLOR_MATRIX, 6500.0).neutral_to_xy(NEUTRAL),
+            lens_correction: Vec::new(),
         }),
         ..PhotoInfo::default()
     }

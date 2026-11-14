@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use crate::color::Vec3;
 use crate::decode::{color_profile, DngTags};
 use crate::demosaic::{self, Cfa};
+use crate::{highlights, lens, rcd};
 use crate::image::{Image, Orientation};
 use crate::profile::ColorProfile;
 use crate::{CameraData, ColorSource, DecodeOptions, Error, Photo, PhotoInfo, RawInfo};
@@ -88,7 +89,16 @@ pub(crate) fn capture(path: &Path, opts: &DecodeOptions, with_mask: bool) -> Res
     let dng = DngTags::read(decoder.as_ref());
 
     let (profile, neutral) = color_profile(&raw, dng.as_ref())?;
-    let sensor = sensor_to_camera_rgb(&raw, opts.half_size, with_mask)?;
+    // As-shot white balance gains (max neutral 1 → gains ≥ 1), for RCD.
+    let gains = neutral.map(|n| (1.0 / n.max(1e-6)) as f32);
+    let mut sensor = sensor_to_camera_rgb(&raw, opts.half_size, with_mask, gains)?;
+    // Lens corrections, not for HDR merges (their shots are aligned as they
+    // are; the merged DNG is corrected when it is developed).
+    let lens_correction = if with_mask || opts.no_lens_correction { Vec::new() } else { lens_opcodes(path, &raw, dng.as_ref(), sensor.crop) };
+    if !lens_correction.is_empty() {
+        let image = std::mem::replace(&mut sensor.image, Image::new(0, 0));
+        sensor.image = lens::apply(image, &lens_correction, sensor.placement);
+    }
 
     let exif_orientation = meta.as_ref().and_then(|m| m.exif.orientation);
     let orientation = match raw.orientation.to_u16() {
@@ -119,6 +129,7 @@ pub(crate) fn capture(path: &Path, opts: &DecodeOptions, with_mask: bool) -> Res
             white_level: sensor.white_level,
             as_shot_neutral: neutral,
             as_shot_white,
+            lens_correction,
         }),
     };
     let camera = CameraNames {
@@ -140,8 +151,32 @@ pub(crate) fn capture(path: &Path, opts: &DecodeOptions, with_mask: bool) -> Res
     })
 }
 
+/// The lens corrections stored in the file: a DNG's OpcodeList3, or the
+/// distortion polynomial in a Panasonic RW2's maker notes.
+fn lens_opcodes(path: &Path, raw: &RawImage, dng: Option<&DngTags>, crop: [usize; 4]) -> Vec<lens::Opcode> {
+    if let Some(dng) = dng {
+        let bounds = raw.active_area.map_or([0, 0, raw.width, raw.height], |r| [r.p.x, r.p.y, r.d.w, r.d.h]);
+        return dng.opcode_list3.as_deref().map_or_else(Vec::new, |list| lens::parse_opcode_list(list, bounds));
+    }
+    if !matches!(raw.clean_make.as_str(), "Panasonic" | "Leica") {
+        return Vec::new();
+    }
+    let tag = (|| {
+        use rawler::formats::tiff::{reader::TiffReader, GenericTiffReader, Value};
+        let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+        let tiff = GenericTiffReader::new(&mut file, 0, 0, None, &[]).ok()?;
+        match &tiff.root_ifd().entries().get(&0x0119)?.value {
+            Value::Undefined(v) | Value::Byte(v) => lens::PanasonicDistortion::from_tag(v),
+            _ => None,
+        }
+    })();
+    tag.map_or_else(Vec::new, |d| vec![lens::Opcode::Warp(lens::panasonic_warp(&d, [crop[0], crop[1]], [crop[2], crop[3]]).0)])
+}
+
 struct Sensor {
     image: Image,
+    /// Where `image` sits on the sensor.
+    placement: lens::Placement,
     clipped: Vec<u8>,
     /// x, y, w, h of the default crop in sensor pixels.
     crop: [usize; 4],
@@ -153,7 +188,7 @@ struct Sensor {
 
 /// Black/white normalisation, demosaic and crop, plus the clipping mask if
 /// asked for. Returns camera RGB where 1.0 is the clip point of each channel.
-fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<Sensor, Error> {
+fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool, gains: [f32; 3]) -> Result<Sensor, Error> {
     let (w, h) = (raw.width, raw.height);
     let area = raw.crop_area.or(raw.active_area);
     let crop = area.map_or([0, 0, w, h], |r| [r.p.x, r.p.y, r.d.w, r.d.h]);
@@ -183,7 +218,8 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
         let wl = white.get(c).or(white.first()).copied().unwrap_or(65535.0);
         (sample((y * w + x) * cpp + c) - b) / (wl - b).max(min_range)
     };
-    let sensor = |image: Image, clipped: Vec<u8>, cfa: String| Sensor { image, clipped, crop, cfa, white_level: white.clone(), float };
+    let sensor = |image: Image, clipped: Vec<u8>, cfa: String, placement| Sensor { image, placement, clipped, crop, cfa, white_level: white.clone(), float };
+    let full_size = lens::Placement { scale: 1.0, offset: [crop[0] as f64, crop[1] as f64] };
 
     match &raw.photometric {
         RawPhotometricInterpretation::Cfa(cfg) => {
@@ -198,7 +234,11 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
             if cfa.colors.iter().any(|&c| c > 2) || cfa.width == 0 {
                 return Err(Error::Unsupported(format!("colour filter pattern {:?}", cfg.cfa.name)));
             }
-            let mosaic: Vec<f32> = (0..w * h).into_par_iter().map(|i| normalise(i % w, i / w, 0)).collect();
+            let mut mosaic: Vec<f32> = (0..w * h).into_par_iter().map(|i| normalise(i % w, i / w, 0)).collect();
+            // Not for HDR merges: they rely on the clipped samples as such.
+            if !with_mask && !float {
+                highlights::reconstruct_mosaic(&mut mosaic, w, h, &cfa, gains);
+            }
             let [cx, cy, cw, ch] = crop;
             if half {
                 // Align the crop to the 2×2 cells so they stay whole.
@@ -209,17 +249,22 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
                     } else {
                         Vec::new()
                     };
-                    return Ok(sensor(img, clipped, cfa.name()));
+                    // A pixel is the 2×2 cell from (2·(x0 + x), 2·(y0 + y)).
+                    let at = lens::Placement { scale: 2.0, offset: [2.0 * cx.div_ceil(2) as f64 + 0.5, 2.0 * cy.div_ceil(2) as f64 + 0.5] };
+                    return Ok(sensor(img, clipped, cfa.name(), at));
                 }
             }
-            let img = demosaic::bilinear_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch]);
+            // RCD for Bayer sensors, bilinear for anything else (X-Trans).
+            let (img, r) = match rcd::rcd_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch], gains) {
+                Some(img) => (img, rcd::SUPPORT_RADIUS),
+                None => (demosaic::bilinear_region(&mosaic, w, h, &cfa, [cx, cy, cw, ch]), demosaic::support_radius(&cfa)),
+            };
             let clipped = if with_mask {
-                let r = demosaic::support_radius(&cfa);
                 dilated_mask(&mosaic, w, h, Grid { origin: [cx, cy], size: (img.width, img.height), step: 1, before: r, after: r })
             } else {
                 Vec::new()
             };
-            Ok(sensor(img, clipped, cfa.name()))
+            Ok(sensor(img, clipped, cfa.name(), full_size))
         }
         RawPhotometricInterpretation::LinearRaw | RawPhotometricInterpretation::BlackIsZero => {
             let img = Image::from_fn(w, h, |x, y| {
@@ -229,7 +274,10 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
                     [normalise(x, y, 0); 3]
                 }
             });
-            let img = img.crop(crop[0], crop[1], crop[2], crop[3]);
+            let mut img = img.crop(crop[0], crop[1], crop[2], crop[3]);
+            if !with_mask && !float && cpp >= 3 {
+                highlights::reconstruct_rgb(&mut img, gains);
+            }
             let img = if half { img.downscale(img.width.max(img.height) / 2) } else { img };
             let clipped = if with_mask {
                 img.pixels.par_iter().map(|p| u8::from(p.iter().any(|&c| c >= CLIP_MASK))).collect()
@@ -237,7 +285,9 @@ fn sensor_to_camera_rgb(raw: &RawImage, half: bool, with_mask: bool) -> Result<S
                 Vec::new()
             };
             let name = if cpp >= 3 { "linear RGB" } else { "monochrome" };
-            Ok(sensor(img, clipped, name.to_string()))
+            let scale = crop[2] as f64 / img.width.max(1) as f64;
+            let at = lens::Placement { scale, offset: [crop[0] as f64 + (scale - 1.0) / 2.0, crop[1] as f64 + (scale - 1.0) / 2.0] };
+            Ok(sensor(img, clipped, name.to_string(), at))
         }
     }
 }

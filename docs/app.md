@@ -138,4 +138,4 @@ With a script running the app prints the time of each render and each exported f
 
 - No catalogue: the app works on folders; edits live in the sidecars.
 - RAW thumbnails come from the preview embedded in the file: they ignore the EXIF orientation and do not show the edits.
-- No lens correction, Optics/Geometry panels, AI masks or range masks (these are kept, not applied).
+- Lens correction only from the file's own data (applied always, no switch yet); no Optics/Geometry panels, AI masks or range masks (these are kept, not applied).

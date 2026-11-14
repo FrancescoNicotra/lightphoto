@@ -313,7 +313,7 @@ fn develop(args: &Args) -> CliResult<()> {
 
     for input in &args.inputs {
         let t = Instant::now();
-        let mut photo = Photo::load(input, &DecodeOptions { half_size: args.half })?;
+        let mut photo = Photo::load(input, &DecodeOptions { half_size: args.half, ..Default::default() })?;
         let mut settings = settings.clone();
         let prepared = adobe::prepare(&adobe_profiles, &mut photo, &mut settings);
         let t_decode = t.elapsed();
@@ -387,7 +387,7 @@ fn dng(args: &Args) -> CliResult<()> {
     let input = &args.inputs[0];
     let out = args.output.as_ref().unwrap();
     let t = Instant::now();
-    let capture = raw::load_capture(input, &DecodeOptions { half_size: args.half })?;
+    let capture = raw::load_capture(input, &DecodeOptions { half_size: args.half, ..Default::default() })?;
     let t_decode = t.elapsed();
 
     // The preview is stored in sensor orientation, like the raw data.
